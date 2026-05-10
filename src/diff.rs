@@ -9,10 +9,20 @@
 //!      similarity scores). The `--raw` form is the only reliable place to get
 //!      rename detection in machine-readable form; the unified-diff body
 //!      strips that information.
-//!   2. `git diff --no-color -U3 -M -C base..head` → hunks, parsed via the
-//!      `patch` crate.
+//!   2. `git diff --no-color -U3 -M -C base..head` → hunks, parsed in
+//!      `parse_unified_diff`.
 //!
 //! We then join the two by file path.
+//!
+//! ## Why hand-rolled diff parsing
+//!
+//! The `patch` crate (0.7.0, last touched 2022) panics on `\ No newline at
+//! end of file` markers when they appear between `-` and `+` lines, which
+//! is what git emits whenever the pre-image had no trailing newline. The
+//! parser hits an `assert!()` and aborts the process. Our needs are minimal
+//! — just hunk headers (`@@ -a,b +c,d @@`) and per-line `+`/`-`/` `
+//! prefixes — so a small purpose-built parser is more robust than depending
+//! on an unmaintained one.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -158,10 +168,8 @@ pub fn extract(repo_path: &Path, base: &str, head: &str) -> anyhow::Result<Diff>
 
     let mut hunks_by_key: HashMap<PathBuf, Vec<Hunk>> = HashMap::new();
     if !unified.trim().is_empty() {
-        for patch in parse_patches(&unified) {
-            let key = patch_lookup_key(&patch);
-            let hunks: Vec<Hunk> = patch.hunks.iter().map(|h| convert_hunk(&key, h)).collect();
-            hunks_by_key.insert(key, hunks);
+        for parsed in parse_unified_diff(&unified) {
+            hunks_by_key.insert(parsed.lookup_key(), parsed.hunks);
         }
     }
 
@@ -308,20 +316,49 @@ fn run_diff_unified(repo: &Path, base: &str, head: &str) -> anyhow::Result<Strin
     String::from_utf8(output.stdout).context("git diff produced non-utf8 output")
 }
 
-/// Parse the unified-diff output one file-section at a time so that one
-/// malformed section (a binary diff, an unrecognized git header) doesn't
-/// invalidate the whole batch.
-fn parse_patches(s: &str) -> Vec<patch::Patch<'_>> {
-    let mut patches = Vec::new();
-    for section in split_into_file_sections(s) {
-        if let Ok(p) = patch::Patch::from_single(section) {
-            patches.push(p);
-        }
-    }
-    patches
+/// Output of parsing one file-section of a unified diff.
+struct ParsedFile {
+    /// Path as it appears after `--- ` in the diff (with `a/` prefix
+    /// stripped, or `/dev/null` if the file is being added).
+    old_path: String,
+    /// Path as it appears after `+++ ` in the diff (with `b/` prefix
+    /// stripped, or `/dev/null` if the file is being deleted).
+    new_path: String,
+    hunks: Vec<Hunk>,
 }
 
-/// Split the unified-diff text into per-file sections, each starting with
+impl ParsedFile {
+    /// The path under which we look up this file's hunks when joining
+    /// against the `--raw` entries: the new path for added/modified/
+    /// renamed files, the old path for deleted files.
+    fn lookup_key(&self) -> PathBuf {
+        let raw = if self.new_path == "/dev/null" {
+            self.old_path.as_str()
+        } else {
+            self.new_path.as_str()
+        };
+        PathBuf::from(raw)
+    }
+}
+
+/// Parse `git diff -U... -M -C` output into per-file hunks.
+///
+/// The parser is deliberately forgiving: any line it doesn't recognize
+/// inside a hunk body is treated as junk and skipped. Sections that don't
+/// produce any hunks (binary diffs, mode-only changes, pure renames) are
+/// emitted with an empty `hunks` vec — they still need a `ParsedFile` so
+/// the caller can join against `--raw` entries by path.
+fn parse_unified_diff(s: &str) -> Vec<ParsedFile> {
+    let mut out = Vec::new();
+    for section in split_into_file_sections(s) {
+        if let Some(p) = parse_file_section(section) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// Split the diff text into per-file sections, each starting with
 /// `diff --git `.
 fn split_into_file_sections(s: &str) -> Vec<&str> {
     let needle = "diff --git ";
@@ -340,13 +377,158 @@ fn split_into_file_sections(s: &str) -> Vec<&str> {
     sections
 }
 
-fn patch_lookup_key(patch: &patch::Patch) -> PathBuf {
-    let raw = if patch.new.path == "/dev/null" {
-        patch.old.path.as_ref()
+fn parse_file_section(section: &str) -> Option<ParsedFile> {
+    let mut lines = section.lines().peekable();
+    let mut old_path = String::new();
+    let mut new_path = String::new();
+    let mut first_hunk_header: Option<String> = None;
+
+    // Header lines: skip everything until we see `--- ` / `+++ ` / `@@ `.
+    while let Some(&line) = lines.peek() {
+        if let Some(rest) = line.strip_prefix("--- ") {
+            old_path = first_field(rest)
+                .map(strip_git_prefix)
+                .unwrap_or("")
+                .to_string();
+            lines.next();
+        } else if let Some(rest) = line.strip_prefix("+++ ") {
+            new_path = first_field(rest)
+                .map(strip_git_prefix)
+                .unwrap_or("")
+                .to_string();
+            lines.next();
+        } else if line.starts_with("@@ ") {
+            first_hunk_header = Some(line.to_string());
+            lines.next();
+            break;
+        } else {
+            lines.next();
+        }
+    }
+
+    let mut hunks = Vec::new();
+    let key_for_id = if new_path == "/dev/null" {
+        old_path.as_str()
     } else {
-        patch.new.path.as_ref()
+        new_path.as_str()
     };
-    PathBuf::from(strip_git_prefix(raw))
+
+    let mut next_header = first_hunk_header;
+    while let Some(header) = next_header.take() {
+        let Some((old_start, _old_count, new_start, _new_count)) = parse_hunk_header(&header)
+        else {
+            // Unrecognizable header — skip the rest of this section.
+            break;
+        };
+        let mut old_lines = Vec::new();
+        let mut new_lines = Vec::new();
+        let mut added_lines: Vec<u32> = Vec::new();
+        let mut removed_lines: Vec<u32> = Vec::new();
+        let mut old_lineno = old_start;
+        let mut new_lineno = new_start;
+        let mut added: u32 = 0;
+        let mut removed: u32 = 0;
+
+        while let Some(&line) = lines.peek() {
+            if line.starts_with("@@ ") {
+                next_header = Some(line.to_string());
+                lines.next();
+                break;
+            }
+            // Defensive: should never occur because sections are split on
+            // `diff --git`, but guard anyway.
+            if line.starts_with("diff --git ") {
+                break;
+            }
+            lines.next();
+            if line.starts_with('\\') {
+                // `\ No newline at end of file` — informational, ignore.
+                continue;
+            } else if let Some(rest) = line.strip_prefix('+') {
+                new_lines.push(rest.to_string());
+                added_lines.push(new_lineno);
+                new_lineno += 1;
+                added += 1;
+            } else if let Some(rest) = line.strip_prefix('-') {
+                old_lines.push(rest.to_string());
+                removed_lines.push(old_lineno);
+                old_lineno += 1;
+                removed += 1;
+            } else if let Some(rest) = line.strip_prefix(' ') {
+                old_lines.push(rest.to_string());
+                new_lines.push(rest.to_string());
+                old_lineno += 1;
+                new_lineno += 1;
+            } else if line.is_empty() {
+                // Some legacy diff producers emit a bare blank line where
+                // `<space>` would be expected. Treat it as empty context.
+                old_lines.push(String::new());
+                new_lines.push(String::new());
+                old_lineno += 1;
+                new_lineno += 1;
+            }
+            // else: junk inside a hunk body (a stray binary marker, an
+            // intermediate `index` line). Skip silently.
+        }
+
+        let path = Path::new(key_for_id);
+        hunks.push(Hunk {
+            id: HunkId::for_hunk(path, new_start),
+            old_range: LineRange {
+                start: old_start,
+                count: count_for(old_start, old_lineno),
+            },
+            new_range: LineRange {
+                start: new_start,
+                count: count_for(new_start, new_lineno),
+            },
+            old_lines,
+            new_lines,
+            added,
+            removed,
+            added_lines,
+            removed_lines,
+        });
+    }
+
+    Some(ParsedFile {
+        old_path,
+        new_path,
+        hunks,
+    })
+}
+
+/// Inclusive line count: lines `start..lineno` covers `lineno - start`
+/// rows. Empty hunks still report start; deleted-only hunks may have
+/// `old_start == 0`, in which case the count is also 0.
+fn count_for(start: u32, end_exclusive: u32) -> u32 {
+    end_exclusive.saturating_sub(start)
+}
+
+/// Parse `@@ -a,b +c,d @@ optional context`. `b` and `d` default to 1
+/// when omitted (e.g. `@@ -5 +5 @@` is one-line on each side).
+fn parse_hunk_header(s: &str) -> Option<(u32, u32, u32, u32)> {
+    let body = s.strip_prefix("@@ ")?;
+    let close = body.find(" @@")?;
+    let header = &body[..close];
+    let mut fields = header.split_whitespace();
+    let old = fields.next()?.strip_prefix('-')?;
+    let new = fields.next()?.strip_prefix('+')?;
+    let parse_range = |s: &str| -> Option<(u32, u32)> {
+        if let Some((a, b)) = s.split_once(',') {
+            Some((a.parse().ok()?, b.parse().ok()?))
+        } else {
+            Some((s.parse().ok()?, 1))
+        }
+    };
+    let (a, b) = parse_range(old)?;
+    let (c, d) = parse_range(new)?;
+    Some((a, b, c, d))
+}
+
+/// First whitespace-separated token, or None if the input is empty.
+fn first_field(s: &str) -> Option<&str> {
+    s.split_whitespace().next()
 }
 
 fn strip_git_prefix(s: &str) -> &str {
@@ -357,56 +539,6 @@ fn strip_git_prefix(s: &str) -> &str {
         return rest;
     }
     s
-}
-
-fn convert_hunk(path: &Path, h: &patch::Hunk) -> Hunk {
-    let mut old_lines = Vec::new();
-    let mut new_lines = Vec::new();
-    let mut added_lines: Vec<u32> = Vec::new();
-    let mut removed_lines: Vec<u32> = Vec::new();
-    let mut old_lineno = h.old_range.start as u32;
-    let mut new_lineno = h.new_range.start as u32;
-    let mut added: u32 = 0;
-    let mut removed: u32 = 0;
-    for line in &h.lines {
-        match line {
-            patch::Line::Add(s) => {
-                new_lines.push((*s).to_string());
-                added_lines.push(new_lineno);
-                new_lineno += 1;
-                added += 1;
-            }
-            patch::Line::Remove(s) => {
-                old_lines.push((*s).to_string());
-                removed_lines.push(old_lineno);
-                old_lineno += 1;
-                removed += 1;
-            }
-            patch::Line::Context(s) => {
-                old_lines.push((*s).to_string());
-                new_lines.push((*s).to_string());
-                old_lineno += 1;
-                new_lineno += 1;
-            }
-        }
-    }
-    Hunk {
-        id: HunkId::for_hunk(path, h.new_range.start as u32),
-        old_range: LineRange {
-            start: h.old_range.start as u32,
-            count: h.old_range.count as u32,
-        },
-        new_range: LineRange {
-            start: h.new_range.start as u32,
-            count: h.new_range.count as u32,
-        },
-        old_lines,
-        new_lines,
-        added,
-        removed,
-        added_lines,
-        removed_lines,
-    }
 }
 
 // --- git plumbing --------------------------------------------------------
@@ -509,27 +641,118 @@ mod tests {
     }
 
     #[test]
-    fn converts_hunk_lines_correctly() {
-        let s = "--- a/foo.rs\n+++ b/foo.rs\n@@ -1,3 +1,3 @@\n ctx\n-old\n+new\n";
-        let p = patch::Patch::from_single(s).unwrap();
+    fn parses_simple_modify_section() {
+        let s = "diff --git a/foo.rs b/foo.rs\n--- a/foo.rs\n+++ b/foo.rs\n\
+                 @@ -1,3 +1,3 @@\n ctx\n-old\n+new\n more\n";
+        let parsed = parse_unified_diff(s);
+        assert_eq!(parsed.len(), 1);
+        let p = &parsed[0];
+        assert_eq!(p.new_path, "foo.rs");
+        assert_eq!(p.hunks.len(), 1);
         let h = &p.hunks[0];
-        let converted = convert_hunk(Path::new("foo.rs"), h);
-        assert_eq!(
-            converted.old_lines,
-            vec!["ctx".to_string(), "old".to_string()]
-        );
-        assert_eq!(
-            converted.new_lines,
-            vec!["ctx".to_string(), "new".to_string()]
-        );
-        assert_eq!(converted.old_range.start, 1);
-        assert_eq!(converted.new_range.start, 1);
-        assert_eq!(converted.added, 1);
-        assert_eq!(converted.removed, 1);
-        // Three-line @@ -1,3 +1,3 @@: ctx is line 1 (both), removed `old`
-        // is old-line 2, added `new` is new-line 2.
-        assert_eq!(converted.added_lines, vec![2]);
-        assert_eq!(converted.removed_lines, vec![2]);
+        assert_eq!(h.old_lines, vec!["ctx", "old", "more"]);
+        assert_eq!(h.new_lines, vec!["ctx", "new", "more"]);
+        assert_eq!(h.added, 1);
+        assert_eq!(h.removed, 1);
+        // ctx is line 1 (both), -old is old-line 2, +new is new-line 2,
+        // more is line 3 (both, context).
+        assert_eq!(h.added_lines, vec![2]);
+        assert_eq!(h.removed_lines, vec![2]);
+        assert_eq!(h.old_range.start, 1);
+        assert_eq!(h.new_range.start, 1);
+    }
+
+    #[test]
+    fn parser_tolerates_no_newline_marker_between_remove_and_add() {
+        // This is the exact pattern that crashed the old `patch` crate:
+        // a `\ No newline at end of file` marker between the `-` line and
+        // the `+` lines.
+        let s = "diff --git a/README.md b/README.md\n\
+                 --- a/README.md\n+++ b/README.md\n\
+                 @@ -1 +1,3 @@\n-old text\n\\ No newline at end of file\n+new text\n+second\n+third\n";
+        let parsed = parse_unified_diff(s);
+        assert_eq!(parsed.len(), 1);
+        let h = &parsed[0].hunks[0];
+        assert_eq!(h.old_lines, vec!["old text"]);
+        assert_eq!(h.new_lines, vec!["new text", "second", "third"]);
+        assert_eq!(h.added, 3);
+        assert_eq!(h.removed, 1);
+    }
+
+    #[test]
+    fn parser_handles_added_file_with_dev_null_old_side() {
+        let s = "diff --git a/new.rs b/new.rs\n--- /dev/null\n+++ b/new.rs\n\
+                 @@ -0,0 +1,2 @@\n+line one\n+line two\n";
+        let parsed = parse_unified_diff(s);
+        assert_eq!(parsed.len(), 1);
+        let p = &parsed[0];
+        assert_eq!(p.old_path, "/dev/null");
+        assert_eq!(p.new_path, "new.rs");
+        assert_eq!(p.lookup_key(), PathBuf::from("new.rs"));
+        let h = &p.hunks[0];
+        assert_eq!(h.added, 2);
+        assert_eq!(h.removed, 0);
+        assert_eq!(h.added_lines, vec![1, 2]);
+    }
+
+    #[test]
+    fn parser_handles_deleted_file_with_dev_null_new_side() {
+        let s = "diff --git a/gone.rs b/gone.rs\n--- a/gone.rs\n+++ /dev/null\n\
+                 @@ -1,2 +0,0 @@\n-line one\n-line two\n";
+        let parsed = parse_unified_diff(s);
+        assert_eq!(parsed.len(), 1);
+        let p = &parsed[0];
+        assert_eq!(p.lookup_key(), PathBuf::from("gone.rs"));
+        let h = &p.hunks[0];
+        assert_eq!(h.removed, 2);
+        assert_eq!(h.added, 0);
+    }
+
+    #[test]
+    fn parser_handles_multiple_hunks_in_one_file() {
+        let s = "diff --git a/x b/x\n--- a/x\n+++ b/x\n\
+                 @@ -1,2 +1,2 @@\n-a\n+A\n b\n\
+                 @@ -10,2 +10,2 @@\n c\n-d\n+D\n";
+        let parsed = parse_unified_diff(s);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].hunks.len(), 2);
+        assert_eq!(parsed[0].hunks[0].new_range.start, 1);
+        assert_eq!(parsed[0].hunks[1].new_range.start, 10);
+    }
+
+    #[test]
+    fn parser_handles_single_line_hunk_header_without_count() {
+        // `@@ -5 +5 @@` is shorthand for `@@ -5,1 +5,1 @@`.
+        let s = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -5 +5 @@\n-old\n+new\n";
+        let parsed = parse_unified_diff(s);
+        let h = &parsed[0].hunks[0];
+        assert_eq!(h.old_range.start, 5);
+        assert_eq!(h.new_range.start, 5);
+        assert_eq!(h.added_lines, vec![5]);
+        assert_eq!(h.removed_lines, vec![5]);
+    }
+
+    #[test]
+    fn parser_skips_binary_file_section_gracefully() {
+        let s = "diff --git a/img.png b/img.png\n\
+                 index 1234..5678\n\
+                 Binary files a/img.png and b/img.png differ\n";
+        let parsed = parse_unified_diff(s);
+        // No `@@` header → no hunks, but we still emit a ParsedFile so the
+        // caller can join against --raw entries (paths still empty since
+        // `--- ` / `+++ ` are absent for binaries).
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].hunks.is_empty());
+    }
+
+    #[test]
+    fn parses_pure_rename_with_no_content_changes() {
+        // `git diff -M` emits no body for an exact rename.
+        let s = "diff --git a/old b/new\n\
+                 similarity index 100%\nrename from old\nrename to new\n";
+        let parsed = parse_unified_diff(s);
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].hunks.is_empty());
     }
 
     #[test]
@@ -538,5 +761,16 @@ mod tests {
             HunkId::for_hunk(Path::new("src/foo.rs"), 42).0,
             "src/foo.rs:42"
         );
+    }
+
+    #[test]
+    fn parses_hunk_header_variants() {
+        assert_eq!(parse_hunk_header("@@ -1,3 +1,3 @@"), Some((1, 3, 1, 3)));
+        assert_eq!(parse_hunk_header("@@ -5 +5 @@"), Some((5, 1, 5, 1)));
+        assert_eq!(
+            parse_hunk_header("@@ -10,2 +12,4 @@ fn foo()"),
+            Some((10, 2, 12, 4))
+        );
+        assert_eq!(parse_hunk_header("garbage"), None);
     }
 }
