@@ -94,8 +94,10 @@ tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
 tree-sitter-python = "0.25"
 tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.23"
 ignore = "0.4"
 toml = "0.8"
+patch = "0.7"
 
 [profile.release]
 lto = "thin"
@@ -159,9 +161,9 @@ pub struct LineRange {
 }
 ```
 
-**Diff extraction:** shell out to `git diff --no-color -U3 {base_sha}..{head_sha}` and parse the unified diff output. Use the `git diff -M -C` flags to detect renames. This is simpler than using `gix` or `git2` as a library and mirrors what the GitHub Action environment provides. Parse the unified diff format into `FileDiff` and `Hunk` structs.
+**Diff extraction:** shell out to `git diff --no-color -U3 -M -C {base_sha}..{head_sha}` and parse the unified diff output via the `patch` crate. The `-M -C` flags request rename and copy detection. This is simpler than using `gix` or `git2` as a library and mirrors what the GitHub Action environment provides. Map the `patch` crate's representation into our owned `FileDiff` and `Hunk` structs (renames, binary markers, and `\ No newline at end of file` are easy to get wrong by hand).
 
-For each `FileDiff`, populate `old_content` and `new_content` by running `git show {sha}:{path}` when a classifier requests it (lazy — only the classifiers that need tree-sitter parsing will trigger this). Implement a method `FileDiff::ensure_content(&mut self, repo_path: &Path)` that populates these fields on first access.
+For each `FileDiff`, populate `old_content` and `new_content` by running `git show {sha}:{path}` when a classifier requests it (lazy — only the classifiers that need tree-sitter parsing will trigger this). Implement a method `FileDiff::ensure_content(&mut self)` that populates these fields on first access. The `repo_path` and SHA pair are stored on the `FileDiff` itself (set by `diff::extract`), so the `Classifier` trait does not need to thread a repo_path argument through every call.
 
 ### 3.2 lang.rs
 
@@ -313,9 +315,19 @@ pub struct Pipeline {
 }
 
 /// A hunk that no heuristic claimed. Passed to the LLM.
-pub struct Unclassified<'a> {
-    pub file: &'a FileDiff,
-    pub hunk: &'a Hunk,
+///
+/// Owned, not borrowed: the pipeline takes `&mut Diff` so classifiers can
+/// lazily load file content, and we cannot keep immutable borrows of
+/// FileDiff/Hunk across that mutation. Cloning the strings here is fine —
+/// they are short, and the LLM step serializes them into a prompt anyway.
+pub struct Unclassified {
+    pub hunk_id: HunkId,
+    pub file_path: PathBuf,
+    pub language: Option<Language>,
+    pub old_range: LineRange,
+    pub new_range: LineRange,
+    pub old_lines: Vec<String>,
+    pub new_lines: Vec<String>,
 }
 
 /// A hunk with its classification decision.
@@ -334,7 +346,7 @@ impl Pipeline {
     /// Run all classifiers against every hunk in the diff.
     /// Returns (classified_hunks, unclassified_hunks).
     /// Classifiers run in priority order; first match wins.
-    pub fn run<'a>(&self, diff: &'a mut Diff) -> (Vec<Classified>, Vec<Unclassified<'a>>) { ... }
+    pub fn run(&self, diff: &mut Diff) -> (Vec<Classified>, Vec<Unclassified>) { ... }
 }
 ```
 
@@ -350,7 +362,9 @@ Path-based. No parsing.
 
 Checks:
 1. File path matches a glob in the `generated_globs` config list.
-2. File has `linguist-generated=true` in `.gitattributes` (read once, cached).
+2. File path is in the set of paths marked `linguist-generated=true` in `.gitattributes`.
+
+The `.gitattributes` file is parsed once in `Pipeline::standard` and the resulting set of generated paths is passed into `Generated::new(globs, generated_paths)`. The Classifier trait has no hook for shared state, so precomputation in the pipeline constructor is the cleanest place for this.
 
 Default globs: `*.lock`, `package-lock.json`, `*_pb2.py`, `*.pb.go`, `dist/**`, `build/**`, `vendor/**`, `*.min.js`, `*.min.css`, `*.generated.*`.
 
@@ -373,6 +387,8 @@ For each hunk:
 2. Walk the AST and collect all comment and docstring/doc-comment nodes with their byte ranges.
 3. Check whether every changed line in the hunk falls entirely within a comment or docstring node.
 4. If yes, the hunk is comment-only.
+
+**Python docstrings** are not comments in the tree-sitter grammar — they appear as an `expression_statement` whose only child is a `string` node, located as the first statement of a `module`, `class_definition`, or `function_definition` body. The classifier MUST handle this case explicitly: a hunk that only changes such a string is comment-only. The same is true of TypeScript/JavaScript JSDoc blocks (which ARE comment nodes) versus standalone string-literal "headers" (which aren't and should not be treated as docstrings).
 
 For files with `language: None`, skip (return `None`).
 
@@ -625,7 +641,7 @@ Parse each verdict into a `Classified` with `Source::Llm { provider, model }` an
 
 ```rust
 pub fn classify_hunks(
-    hunks: &[Unclassified<'_>],
+    hunks: &[Unclassified],
     config: &LlmConfig,
 ) -> anyhow::Result<Vec<Classified>> { ... }
 ```
@@ -921,7 +937,6 @@ garbelour review [OPTIONS]
 | `--llm-provider`     | auto-detect from env  | LLM provider: `anthropic`, `openai`, `ollama`            |
 | `--llm-model`        | provider default      | Model to use                                             |
 | `--llm-base-url`     | provider default      | Override API base URL                                    |
-| `--no-llm`           | `false`               | Explicitly disable LLM even if keys are set              |
 | `--config <path>`    | `garbelour.toml`      | Path to config file                                      |
 | `--size-threshold`   | `150`                 | Lines changed above which a hunk auto-classifies as Review |
 
@@ -1001,7 +1016,7 @@ fn main() -> anyhow::Result<()> {
     let (mut classified, unclassified) = pipeline.run(&mut diff);
 
     // 3. Optional LLM pass
-    if cli.llm && !cli.no_llm && !unclassified.is_empty() {
+    if cli.llm && !unclassified.is_empty() {
         let llm_config = llm::detect_provider(
             cli.llm_provider.as_deref(),
             cli.llm_model.as_deref(),
@@ -1011,17 +1026,24 @@ fn main() -> anyhow::Result<()> {
         classified.extend(llm_results);
     }
 
-    // 4. Any hunks still unclassified default to Skim
+    // 4. Any hunks still unclassified default to Review.
+    //
+    // Heuristics only emit Skip or Review — there is no Skim heuristic.
+    // Without --llm, any hunk that no heuristic claimed has not actually
+    // been evaluated. Defaulting it to Skim would tell the reviewer "you
+    // can glance at this" with no evidence behind that claim, which
+    // undermines the whole tool. Review is the safe default; Skim should
+    // require positive evidence (an LLM verdict).
     for u in &unclassified {
-        if !classified.iter().any(|c| c.hunk_id == u.hunk.id) {
+        if !classified.iter().any(|c| c.hunk_id == u.hunk_id) {
             classified.push(Classified {
-                hunk_id: u.hunk.id.clone(),
-                file_path: u.file.path.clone(),
-                new_range: u.hunk.new_range.clone(),
+                hunk_id: u.hunk_id.clone(),
+                file_path: u.file_path.clone(),
+                new_range: u.new_range.clone(),
                 classification: Classification {
-                    level: Level::Skim,
+                    level: Level::Review,
                     category: Category::LlmAssessed,
-                    rationale: "unclassified — defaulting to skim".into(),
+                    rationale: "no heuristic match and LLM not run — defaulting to review".into(),
                     source: Source::Heuristic { name: "default".into() },
                     focus_lines: None,
                 },
