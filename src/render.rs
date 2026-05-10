@@ -71,7 +71,12 @@ pub fn human(_diff: &Diff, classified: &[Classified], use_color: bool) -> String
     }
     if !skip.is_empty() {
         let count: usize = skip.values().map(Vec::len).sum();
-        push_color(&mut out, &format!("  Skip ({})\n", count), use_color, Color::DimBold);
+        push_color(
+            &mut out,
+            &format!("  Skip ({})\n", count),
+            use_color,
+            Color::DimBold,
+        );
         for (category, files) in &skip {
             let label = category_label(*category);
             let mut deduped: Vec<&String> = files.iter().collect();
@@ -103,11 +108,7 @@ fn push_section(
         use_color,
         header_color,
     );
-    let max_locator = items
-        .iter()
-        .map(|c| locator(c).len())
-        .max()
-        .unwrap_or(0);
+    let max_locator = items.iter().map(|c| locator(c).len()).max().unwrap_or(0);
     for c in items {
         let loc = locator(c);
         let pad = " ".repeat(max_locator.saturating_sub(loc.len()) + 4);
@@ -143,11 +144,20 @@ fn locator(c: &Classified) -> String {
 fn preview_paths(paths: &[&String]) -> String {
     const MAX: usize = 3;
     if paths.len() <= MAX {
-        paths.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+        paths
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     } else {
         format!(
             "{}, ...",
-            paths.iter().take(MAX).map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            paths
+                .iter()
+                .take(MAX)
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     }
 }
@@ -277,11 +287,7 @@ fn markdown_item(c: &Classified, repo_ref: Option<&RepoRef>) -> String {
             };
             (display, f.start, f.side)
         }
-        None => (
-            c.new_range.start.to_string(),
-            c.new_range.start,
-            Side::New,
-        ),
+        None => (c.new_range.start.to_string(), c.new_range.start, Side::New),
     };
     let label = format!("`{}:{}`", c.file_path.display(), display_line);
     let link_text = match repo_ref {
@@ -410,12 +416,17 @@ mod tests {
         Classified {
             hunk_id: HunkId(format!("{file}:{line}")),
             file_path: PathBuf::from(file),
-            new_range: LineRange { start: line, count: 1 },
+            new_range: LineRange {
+                start: line,
+                count: 1,
+            },
             classification: Classification {
                 level,
                 category,
                 rationale: "test rationale".into(),
-                source: Source::Heuristic { name: "test".into() },
+                source: Source::Heuristic {
+                    name: "test".into(),
+                },
                 focus_lines: None,
             },
         }
@@ -490,7 +501,12 @@ mod tests {
 
     #[test]
     fn markdown_review_items_have_no_link_without_repo_ref() {
-        let cs = vec![classified(Level::Review, Category::ControlFlow, "src/x.rs", 42)];
+        let cs = vec![classified(
+            Level::Review,
+            Category::ControlFlow,
+            "src/x.rs",
+            42,
+        )];
         let out = markdown(&diff(), &cs, None);
         assert!(out.contains("`src/x.rs:42`"));
         assert!(!out.contains("https://"));
@@ -504,7 +520,12 @@ mod tests {
             repo: "widget".into(),
             pr: 42,
         };
-        let cs = vec![classified(Level::Review, Category::ControlFlow, "src/x.rs", 7)];
+        let cs = vec![classified(
+            Level::Review,
+            Category::ControlFlow,
+            "src/x.rs",
+            7,
+        )];
         let out = markdown(&diff(), &cs, Some(&r));
         assert!(out.contains("https://github.com/acme/widget/pull/42/files#diff-"));
         assert!(out.contains("R7"));
@@ -520,7 +541,12 @@ mod tests {
 
     #[test]
     fn json_renders_valid_schema() {
-        let cs = vec![classified(Level::Review, Category::PublicApiChange, "src/x.rs", 142)];
+        let cs = vec![classified(
+            Level::Review,
+            Category::PublicApiChange,
+            "src/x.rs",
+            142,
+        )];
         let out = json(&diff(), &cs).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["base_sha"].as_str().unwrap().len(), 40);

@@ -1,10 +1,10 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use garbelour::cli::{Cli, ColorChoice, Command, Format, FormatChoice, ReviewArgs};
 use garbelour::classify::{
     Category, Classification, Classified, Level, Pipeline, PipelineConfig, Source,
 };
+use garbelour::cli::{Cli, ColorChoice, Command, Format, FormatChoice, ReviewArgs};
 use garbelour::config::Config;
 use garbelour::{classifiers, diff, github, llm, render};
 
@@ -30,7 +30,10 @@ fn review(args: ReviewArgs) -> anyhow::Result<u8> {
 
     // Resolve base/head: prefer CLI, then GitHub event payload (when
     // available), then error.
-    let event = if args.base.is_none() || args.owner.is_none() || args.repo_name.is_none() || args.pr.is_none()
+    let event = if args.base.is_none()
+        || args.owner.is_none()
+        || args.repo_name.is_none()
+        || args.pr.is_none()
     {
         github::parse_event().ok()
     } else {
@@ -41,7 +44,9 @@ fn review(args: ReviewArgs) -> anyhow::Result<u8> {
         .base
         .clone()
         .or_else(|| event.as_ref().map(|e| e.base_sha.clone()))
-        .ok_or_else(|| anyhow::anyhow!("--base is required (and no GITHUB_EVENT_PATH was found)"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("--base is required (and no GITHUB_EVENT_PATH was found)")
+        })?;
     let head = if args.head == "HEAD" {
         event
             .as_ref()
@@ -62,7 +67,9 @@ fn review(args: ReviewArgs) -> anyhow::Result<u8> {
     // 3. Optional LLM pass.
     if args.llm && !unclassified.is_empty() {
         let llm_config = llm::detect_provider(
-            args.llm_provider.as_deref().or(config.llm.provider.as_deref()),
+            args.llm_provider
+                .as_deref()
+                .or(config.llm.provider.as_deref()),
             args.llm_model.as_deref().or(config.llm.model.as_deref()),
             args.llm_base_url.as_deref(),
         )?;
@@ -82,7 +89,9 @@ fn review(args: ReviewArgs) -> anyhow::Result<u8> {
                     level: Level::Review,
                     category: Category::LlmAssessed,
                     rationale: "no heuristic match and LLM not run — defaulting to review".into(),
-                    source: Source::Heuristic { name: "default".into() },
+                    source: Source::Heuristic {
+                        name: "default".into(),
+                    },
                     focus_lines: None,
                 },
             });
@@ -104,9 +113,9 @@ fn review(args: ReviewArgs) -> anyhow::Result<u8> {
             let body = render::markdown(&diff, &classified, repo_ref.as_ref());
             if args.post_comment {
                 let client = github::GitHubClient::from_env()?;
-                let pr = repo_ref
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("--post-comment requires owner/repo/pr (CLI or event payload)"))?;
+                let pr = repo_ref.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("--post-comment requires owner/repo/pr (CLI or event payload)")
+                })?;
                 github::upsert_sticky_comment(&client, &pr.owner, &pr.repo, pr.pr, &body)?;
                 eprintln!("garbelour: posted review map to PR #{}", pr.pr);
             } else {
@@ -132,7 +141,10 @@ fn build_pipeline_config(args: &ReviewArgs, config: &Config) -> PipelineConfig {
     lockfile_names.dedup();
     let generated_paths = classifiers::generated::read_gitattributes_generated(&args.repo);
     PipelineConfig {
-        size_threshold: config.classify.size_threshold.unwrap_or(args.size_threshold),
+        size_threshold: config
+            .classify
+            .size_threshold
+            .unwrap_or(args.size_threshold),
         generated_globs,
         generated_paths,
         lockfile_names,
@@ -160,9 +172,7 @@ fn resolve_color(args: &ReviewArgs) -> bool {
     match args.color {
         ColorChoice::Always => true,
         ColorChoice::Never => false,
-        ColorChoice::Auto => {
-            render::stdout_is_tty() && std::env::var_os("NO_COLOR").is_none()
-        }
+        ColorChoice::Auto => render::stdout_is_tty() && std::env::var_os("NO_COLOR").is_none(),
     }
 }
 

@@ -64,7 +64,9 @@ impl Classifier for PublicApi {
                             "{} signature changed at lines {}–{}",
                             decl.kind_label, decl.sig.0, decl.sig.1
                         ),
-                        source: Source::Heuristic { name: "public_api".into() },
+                        source: Source::Heuristic {
+                            name: "public_api".into(),
+                        },
                         focus_lines: Some(FocusLines {
                             start: decl.sig.0,
                             end: decl.sig.1,
@@ -91,7 +93,9 @@ impl Classifier for PublicApi {
                                 "{} removed at old lines {}–{}",
                                 decl.kind_label, decl.sig.0, decl.sig.1
                             ),
-                            source: Source::Heuristic { name: "public_api".into() },
+                            source: Source::Heuristic {
+                                name: "public_api".into(),
+                            },
                             focus_lines: Some(FocusLines {
                                 start: decl.sig.0,
                                 end: decl.sig.1,
@@ -158,7 +162,10 @@ fn rust_decl(node: &Node) -> Option<PublicDecl> {
     } else {
         node_lines(node)
     };
-    Some(PublicDecl { sig, kind_label: label })
+    Some(PublicDecl {
+        sig,
+        kind_label: label,
+    })
 }
 
 fn python_decl(node: &Node, source: &[u8]) -> Option<PublicDecl> {
@@ -182,7 +189,10 @@ fn python_decl(node: &Node, source: &[u8]) -> Option<PublicDecl> {
     } else {
         node_lines(node)
     };
-    Some(PublicDecl { sig, kind_label: label })
+    Some(PublicDecl {
+        sig,
+        kind_label: label,
+    })
 }
 
 fn ts_js_decl(node: &Node) -> Option<PublicDecl> {
@@ -201,7 +211,10 @@ fn ts_js_decl(node: &Node) -> Option<PublicDecl> {
             break;
         }
     }
-    Some(PublicDecl { sig, kind_label: "exported declaration" })
+    Some(PublicDecl {
+        sig,
+        kind_label: "exported declaration",
+    })
 }
 
 fn has_pub_visibility(node: &Node) -> bool {
@@ -243,7 +256,11 @@ fn signature_range_excluding_body(node: &Node, body_field: &str) -> Option<(u32,
     // body opens on the same line as the signature (one-liner like
     // `fn f() { 1 }`), use that line.
     let body_row = body.start_position().row as u32 + 1;
-    let end = if body_row > start { body_row - 1 } else { start };
+    let end = if body_row > start {
+        body_row - 1
+    } else {
+        start
+    };
     Some((start, end.max(start)))
 }
 
@@ -269,8 +286,14 @@ mod tests {
         });
         let hunk = Hunk {
             id: HunkId("test:1".into()),
-            old_range: LineRange { start: 1, count: old.lines().count() as u32 },
-            new_range: LineRange { start: 1, count: new.lines().count() as u32 },
+            old_range: LineRange {
+                start: 1,
+                count: old.lines().count() as u32,
+            },
+            new_range: LineRange {
+                start: 1,
+                count: new.lines().count() as u32,
+            },
             old_lines: old.lines().map(|s| s.to_string()).collect(),
             new_lines: new.lines().map(|s| s.to_string()).collect(),
             added: added.len() as u32,
@@ -278,8 +301,12 @@ mod tests {
             added_lines: added,
             removed_lines: removed,
         };
-        let mut file =
-            FileDiff::for_test(path, FileStatus::Modified, Some(language), vec![hunk.clone()]);
+        let mut file = FileDiff::for_test(
+            path,
+            FileStatus::Modified,
+            Some(language),
+            vec![hunk.clone()],
+        );
         file.old_content = Some(old.to_string());
         file.new_content = Some(new.to_string());
         (file, hunk)

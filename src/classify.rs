@@ -227,7 +227,9 @@ mod tests {
                     level: Level::Skip,
                     category: Category::Lockfile,
                     rationale: "test".into(),
-                    source: Source::Heuristic { name: self.name().into() },
+                    source: Source::Heuristic {
+                        name: self.name().into(),
+                    },
                     focus_lines: None,
                 })
             } else {
@@ -274,7 +276,10 @@ mod tests {
         for c in &classified {
             assert!(c.file_path.to_string_lossy().contains("match"));
         }
-        assert!(unclassified[0].file_path.to_string_lossy().contains("other"));
+        assert!(unclassified[0]
+            .file_path
+            .to_string_lossy()
+            .contains("other"));
         // Hunks are restored after the run.
         assert_eq!(diff.files[0].hunks.len(), 2);
         assert_eq!(diff.files[1].hunks.len(), 1);
@@ -299,14 +304,24 @@ mod tests {
                     level: Level::Skip,
                     category: self.category,
                     rationale: self.name.into(),
-                    source: Source::Heuristic { name: self.name.into() },
+                    source: Source::Heuristic {
+                        name: self.name.into(),
+                    },
                     focus_lines: None,
                 })
             }
         }
         let pipeline = Pipeline::new(vec![
-            Box::new(Tag { name: "second", priority: 100, category: Category::Generated }),
-            Box::new(Tag { name: "first", priority: 0, category: Category::Lockfile }),
+            Box::new(Tag {
+                name: "second",
+                priority: 100,
+                category: Category::Generated,
+            }),
+            Box::new(Tag {
+                name: "first",
+                priority: 0,
+                category: Category::Lockfile,
+            }),
         ]);
         let mut diff = Diff {
             base_sha: "0".repeat(40),
@@ -349,8 +364,14 @@ mod tests {
             level: Level::Review,
             category: Category::PublicApiChange,
             rationale: "pub fn signature changed".into(),
-            source: Source::Heuristic { name: "public_api".into() },
-            focus_lines: Some(FocusLines { start: 10, end: 14, side: Side::New }),
+            source: Source::Heuristic {
+                name: "public_api".into(),
+            },
+            focus_lines: Some(FocusLines {
+                start: 10,
+                end: 14,
+                side: Side::New,
+            }),
         };
         let json = serde_json::to_string(&c).unwrap();
         let back: Classification = serde_json::from_str(&json).unwrap();

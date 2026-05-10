@@ -41,7 +41,10 @@ pub struct Generated {
 impl Generated {
     pub fn new(extra_globs: Vec<String>, paths: HashSet<PathBuf>) -> anyhow::Result<Self> {
         let mut builder = GlobSetBuilder::new();
-        for pattern in DEFAULT_GLOBS.iter().map(|s| (*s).to_string()).chain(extra_globs)
+        for pattern in DEFAULT_GLOBS
+            .iter()
+            .map(|s| (*s).to_string())
+            .chain(extra_globs)
         {
             let glob = Glob::new(&pattern)
                 .with_context(|| format!("invalid generated_globs pattern: {pattern:?}"))?;
@@ -76,7 +79,9 @@ impl Classifier for Generated {
                 level: Level::Skip,
                 category: Category::Generated,
                 rationale: format!("generated file ({})", reason),
-                source: Source::Heuristic { name: "generated".into() },
+                source: Source::Heuristic {
+                    name: "generated".into(),
+                },
                 focus_lines: None,
             })
         } else {
@@ -103,7 +108,9 @@ pub fn read_gitattributes_generated(repo_path: &std::path::Path) -> HashSet<Path
             continue;
         }
         let mut tokens = trimmed.split_whitespace();
-        let Some(pattern) = tokens.next() else { continue };
+        let Some(pattern) = tokens.next() else {
+            continue;
+        };
         let mut marked = false;
         for attr in tokens {
             // We honor only the literal `linguist-generated=true` form (and
@@ -149,7 +156,12 @@ mod tests {
     }
 
     fn file(path: &str) -> FileDiff {
-        FileDiff::for_test(PathBuf::from(path), FileStatus::Modified, None, vec![hunk()])
+        FileDiff::for_test(
+            PathBuf::from(path),
+            FileStatus::Modified,
+            None,
+            vec![hunk()],
+        )
     }
 
     #[test]
@@ -213,7 +225,10 @@ mod tests {
         let paths = read_gitattributes_generated(&dir);
         assert!(paths.contains(&PathBuf::from("docs/api.json")));
         assert!(paths.contains(&PathBuf::from("generated/manifest.json")));
-        assert!(!paths.contains(&PathBuf::from("src/*")), "globs are skipped");
+        assert!(
+            !paths.contains(&PathBuf::from("src/*")),
+            "globs are skipped"
+        );
         assert!(
             !paths.contains(&PathBuf::from("vendored/lib.js")),
             "explicitly negated"

@@ -22,8 +22,8 @@ pub struct GitHubClient {
 impl GitHubClient {
     /// Build from `GITHUB_TOKEN`. Errors if the env var is missing.
     pub fn from_env() -> anyhow::Result<Self> {
-        let token = std::env::var("GITHUB_TOKEN")
-            .map_err(|_| anyhow!("GITHUB_TOKEN is not set"))?;
+        let token =
+            std::env::var("GITHUB_TOKEN").map_err(|_| anyhow!("GITHUB_TOKEN is not set"))?;
         Ok(Self {
             token,
             base_url: "https://api.github.com".to_string(),
@@ -159,8 +159,8 @@ pub struct PrEvent {
 
 /// Read `GITHUB_EVENT_PATH`, parse the JSON, and extract PR fields.
 pub fn parse_event() -> anyhow::Result<PrEvent> {
-    let path = std::env::var("GITHUB_EVENT_PATH")
-        .map_err(|_| anyhow!("GITHUB_EVENT_PATH is not set"))?;
+    let path =
+        std::env::var("GITHUB_EVENT_PATH").map_err(|_| anyhow!("GITHUB_EVENT_PATH is not set"))?;
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("reading GITHUB_EVENT_PATH={path}"))?;
     parse_event_json(&text)

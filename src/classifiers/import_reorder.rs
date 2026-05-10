@@ -98,7 +98,9 @@ impl Classifier for ImportReorder {
             level: Level::Skip,
             category: Category::ImportReorder,
             rationale: "imports reordered, no semantic change".into(),
-            source: Source::Heuristic { name: "import_reorder".into() },
+            source: Source::Heuristic {
+                name: "import_reorder".into(),
+            },
             focus_lines: None,
         })
     }
@@ -121,11 +123,7 @@ fn collect_imports(language: Language, tree: &Tree, source: &[u8]) -> Vec<Import
         if !is_top_level(node) {
             return;
         }
-        let text = node
-            .utf8_text(source)
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let text = node.utf8_text(source).unwrap_or("").trim().to_string();
         out.push(Import {
             text,
             lines: crate::ast::node_lines(node),
@@ -171,8 +169,14 @@ mod tests {
         });
         let hunk = Hunk {
             id: HunkId("test:1".into()),
-            old_range: LineRange { start: 1, count: old.lines().count() as u32 },
-            new_range: LineRange { start: 1, count: new.lines().count() as u32 },
+            old_range: LineRange {
+                start: 1,
+                count: old.lines().count() as u32,
+            },
+            new_range: LineRange {
+                start: 1,
+                count: new.lines().count() as u32,
+            },
             old_lines: old.lines().map(|s| s.to_string()).collect(),
             new_lines: new.lines().map(|s| s.to_string()).collect(),
             added: added.len() as u32,
@@ -180,8 +184,12 @@ mod tests {
             added_lines: added,
             removed_lines: removed,
         };
-        let mut file =
-            FileDiff::for_test(path, FileStatus::Modified, Some(language), vec![hunk.clone()]);
+        let mut file = FileDiff::for_test(
+            path,
+            FileStatus::Modified,
+            Some(language),
+            vec![hunk.clone()],
+        );
         file.old_content = Some(old.to_string());
         file.new_content = Some(new.to_string());
         (file, hunk)

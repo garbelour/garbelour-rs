@@ -185,10 +185,7 @@ pub fn build_prompt(batch: &[Unclassified]) -> String {
             "Hunk {id}\n  File: {path} ({lang})\n",
             id = h.hunk_id.0,
             path = h.file_path.display(),
-            lang = h
-                .language
-                .map(|l| l.as_str())
-                .unwrap_or("unknown"),
+            lang = h.language.map(|l| l.as_str()).unwrap_or("unknown"),
         ));
         out.push_str("  --- old\n");
         for line in &h.old_lines {
@@ -234,7 +231,10 @@ fn call_anthropic(system: &str, user: &str, config: &LlmConfig) -> anyhow::Resul
         .map_err(|e| anyhow::anyhow!("failed to read Anthropic response: {}", e))?;
     let parsed: Value = serde_json::from_str(&text)
         .map_err(|e| anyhow::anyhow!("failed to parse Anthropic response JSON: {}", e))?;
-    Ok(parsed["content"][0]["text"].as_str().unwrap_or("").to_string())
+    Ok(parsed["content"][0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .to_string())
 }
 
 fn call_openai_compat(system: &str, user: &str, config: &LlmConfig) -> anyhow::Result<String> {
@@ -263,11 +263,7 @@ fn call_openai_compat(system: &str, user: &str, config: &LlmConfig) -> anyhow::R
         .to_string())
 }
 
-pub fn parse_response(
-    raw: &str,
-    batch: &[Unclassified],
-    config: &LlmConfig,
-) -> Vec<Classified> {
+pub fn parse_response(raw: &str, batch: &[Unclassified], config: &LlmConfig) -> Vec<Classified> {
     let json_str = extract_json(raw);
     let parsed: Value = match serde_json::from_str(json_str) {
         Ok(v) => v,
@@ -285,7 +281,8 @@ pub fn parse_response(
     };
 
     // Map hunk_id → index for quick lookup and so we ignore stray ids.
-    let mut by_id: std::collections::HashMap<&str, &Unclassified> = std::collections::HashMap::new();
+    let mut by_id: std::collections::HashMap<&str, &Unclassified> =
+        std::collections::HashMap::new();
     for u in batch {
         by_id.insert(u.hunk_id.0.as_str(), u);
     }
@@ -308,7 +305,11 @@ pub fn parse_response(
         let focus_start = item["focus_start"].as_u64().map(|v| v as u32);
         let focus_end = item["focus_end"].as_u64().map(|v| v as u32);
         let focus_lines = match (focus_start, focus_end) {
-            (Some(s), Some(e)) => Some(FocusLines { start: s, end: e, side: Side::New }),
+            (Some(s), Some(e)) => Some(FocusLines {
+                start: s,
+                end: e,
+                side: Side::New,
+            }),
             _ => None,
         };
         let rationale = item["rationale"].as_str().unwrap_or("").to_string();
@@ -359,8 +360,14 @@ mod tests {
             hunk_id: HunkId(id.to_string()),
             file_path: PathBuf::from(path),
             language: Some(Language::Rust),
-            old_range: LineRange { start: line, count: 1 },
-            new_range: LineRange { start: line, count: 1 },
+            old_range: LineRange {
+                start: line,
+                count: 1,
+            },
+            new_range: LineRange {
+                start: line,
+                count: 1,
+            },
             old_lines: vec!["old".into()],
             new_lines: vec!["new".into()],
         }

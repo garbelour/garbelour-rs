@@ -148,10 +148,10 @@ impl FileDiff {
 
 /// Extract a diff between two git refs in the repository at `repo_path`.
 pub fn extract(repo_path: &Path, base: &str, head: &str) -> anyhow::Result<Diff> {
-    let base_sha = rev_parse(repo_path, base)
-        .with_context(|| format!("resolving base ref `{}`", base))?;
-    let head_sha = rev_parse(repo_path, head)
-        .with_context(|| format!("resolving head ref `{}`", head))?;
+    let base_sha =
+        rev_parse(repo_path, base).with_context(|| format!("resolving base ref `{}`", base))?;
+    let head_sha =
+        rev_parse(repo_path, head).with_context(|| format!("resolving head ref `{}`", head))?;
 
     let raw_entries = run_diff_raw(repo_path, &base_sha, &head_sha)?;
     let unified = run_diff_unified(repo_path, &base_sha, &head_sha)?;
@@ -160,11 +160,7 @@ pub fn extract(repo_path: &Path, base: &str, head: &str) -> anyhow::Result<Diff>
     if !unified.trim().is_empty() {
         for patch in parse_patches(&unified) {
             let key = patch_lookup_key(&patch);
-            let hunks: Vec<Hunk> = patch
-                .hunks
-                .iter()
-                .map(|h| convert_hunk(&key, h))
-                .collect();
+            let hunks: Vec<Hunk> = patch.hunks.iter().map(|h| convert_hunk(&key, h)).collect();
             hunks_by_key.insert(key, hunks);
         }
     }
@@ -187,7 +183,11 @@ pub fn extract(repo_path: &Path, base: &str, head: &str) -> anyhow::Result<Diff>
         });
     }
 
-    Ok(Diff { base_sha, head_sha, files })
+    Ok(Diff {
+        base_sha,
+        head_sha,
+        files,
+    })
 }
 
 // --- raw-output parsing --------------------------------------------------
@@ -217,8 +217,8 @@ fn run_diff_raw(repo: &Path, base: &str, head: &str) -> anyhow::Result<Vec<RawEn
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let stdout = String::from_utf8(output.stdout)
-        .context("git diff --raw produced non-utf8 output")?;
+    let stdout =
+        String::from_utf8(output.stdout).context("git diff --raw produced non-utf8 output")?;
     parse_raw_entries(&stdout)
 }
 
@@ -514,8 +514,14 @@ mod tests {
         let p = patch::Patch::from_single(s).unwrap();
         let h = &p.hunks[0];
         let converted = convert_hunk(Path::new("foo.rs"), h);
-        assert_eq!(converted.old_lines, vec!["ctx".to_string(), "old".to_string()]);
-        assert_eq!(converted.new_lines, vec!["ctx".to_string(), "new".to_string()]);
+        assert_eq!(
+            converted.old_lines,
+            vec!["ctx".to_string(), "old".to_string()]
+        );
+        assert_eq!(
+            converted.new_lines,
+            vec!["ctx".to_string(), "new".to_string()]
+        );
         assert_eq!(converted.old_range.start, 1);
         assert_eq!(converted.new_range.start, 1);
         assert_eq!(converted.added, 1);

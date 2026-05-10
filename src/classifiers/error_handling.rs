@@ -56,7 +56,9 @@ impl Classifier for ErrorHandlingDeleted {
             level: Level::Review,
             category: Category::ErrorHandlingDeleted,
             rationale: format!("removed {} at old lines {}–{}", label, range.0, range.1),
-            source: Source::Heuristic { name: "error_handling".into() },
+            source: Source::Heuristic {
+                name: "error_handling".into(),
+            },
             focus_lines: Some(FocusLines {
                 start: range.0,
                 end: range.1,
@@ -89,7 +91,9 @@ fn find_removed_error_handler(
         let touched = if start_row == end_row {
             removed_lines.contains(&start_row)
         } else {
-            removed_lines.iter().any(|&l| l >= start_row && l <= end_row)
+            removed_lines
+                .iter()
+                .any(|&l| l >= start_row && l <= end_row)
         };
         if touched && construct_is_actually_present_on_removed_line(node, removed_lines) {
             found = Some((label, (start_row, end_row)));
@@ -154,8 +158,14 @@ mod tests {
         });
         let hunk = Hunk {
             id: HunkId("test:1".into()),
-            old_range: LineRange { start: 1, count: old.lines().count() as u32 },
-            new_range: LineRange { start: 1, count: new.lines().count() as u32 },
+            old_range: LineRange {
+                start: 1,
+                count: old.lines().count() as u32,
+            },
+            new_range: LineRange {
+                start: 1,
+                count: new.lines().count() as u32,
+            },
             old_lines: old.lines().map(|s| s.to_string()).collect(),
             new_lines: new.lines().map(|s| s.to_string()).collect(),
             added: added.len() as u32,
@@ -163,8 +173,12 @@ mod tests {
             added_lines: added,
             removed_lines: removed,
         };
-        let mut file =
-            FileDiff::for_test(path, FileStatus::Modified, Some(language), vec![hunk.clone()]);
+        let mut file = FileDiff::for_test(
+            path,
+            FileStatus::Modified,
+            Some(language),
+            vec![hunk.clone()],
+        );
         file.old_content = Some(old.to_string());
         file.new_content = Some(new.to_string());
         (file, hunk)
@@ -195,13 +209,7 @@ mod tests {
     fn python_removed_try_block() {
         let old = "def f():\n    try:\n        do()\n    except Exception:\n        pass\n";
         let new = "def f():\n    do()\n";
-        let (mut f, h) = fixture(
-            Language::Python,
-            old,
-            new,
-            vec![2],
-            vec![2, 3, 4, 5],
-        );
+        let (mut f, h) = fixture(Language::Python, old, new, vec![2], vec![2, 3, 4, 5]);
         let result = ErrorHandlingDeleted::new().classify(&mut f, &h).unwrap();
         assert_eq!(result.category, Category::ErrorHandlingDeleted);
     }
@@ -219,13 +227,7 @@ mod tests {
     fn typescript_removed_try_catch() {
         let old = "function f() {\n    try {\n        doIt();\n    } catch (e) {\n        log(e);\n    }\n}\n";
         let new = "function f() {\n    doIt();\n}\n";
-        let (mut f, h) = fixture(
-            Language::TypeScript,
-            old,
-            new,
-            vec![2],
-            vec![2, 3, 4, 5, 6],
-        );
+        let (mut f, h) = fixture(Language::TypeScript, old, new, vec![2], vec![2, 3, 4, 5, 6]);
         assert!(ErrorHandlingDeleted::new().classify(&mut f, &h).is_some());
     }
 
@@ -233,13 +235,7 @@ mod tests {
     fn javascript_removed_catch_clause() {
         let old = "function f() {\n    try {\n        doIt();\n    } catch (e) {\n        log(e);\n    }\n}\n";
         let new = "function f() {\n    try {\n        doIt();\n    } finally {\n        cleanup();\n    }\n}\n";
-        let (mut f, h) = fixture(
-            Language::JavaScript,
-            old,
-            new,
-            vec![4, 5],
-            vec![4, 5],
-        );
+        let (mut f, h) = fixture(Language::JavaScript, old, new, vec![4, 5], vec![4, 5]);
         assert!(ErrorHandlingDeleted::new().classify(&mut f, &h).is_some());
     }
 

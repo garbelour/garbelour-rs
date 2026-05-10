@@ -46,8 +46,8 @@ impl Config {
         if !path.exists() {
             return Ok(Config::default());
         }
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
     }
 }
@@ -84,7 +84,10 @@ mod tests {
         assert_eq!(cfg.classify.generated_globs.len(), 2);
         assert_eq!(cfg.classify.size_threshold, Some(200));
         assert_eq!(cfg.llm.provider.as_deref(), Some("anthropic"));
-        assert_eq!(cfg.github.base_url.as_deref(), Some("https://github.example.com/api/v3"));
+        assert_eq!(
+            cfg.github.base_url.as_deref(),
+            Some("https://github.example.com/api/v3")
+        );
     }
 
     #[test]

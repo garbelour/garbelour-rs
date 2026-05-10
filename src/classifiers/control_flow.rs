@@ -62,11 +62,10 @@ impl Classifier for ControlFlow {
                         return Some(Classification {
                             level: Level::Review,
                             category: Category::ControlFlow,
-                            rationale: format!(
-                                "{} at lines {}–{}",
-                                kind, range.0, range.1
-                            ),
-                            source: Source::Heuristic { name: "control_flow".into() },
+                            rationale: format!("{} at lines {}–{}", kind, range.0, range.1),
+                            source: Source::Heuristic {
+                                name: "control_flow".into(),
+                            },
                             focus_lines: Some(FocusLines {
                                 start: range.0,
                                 end: range.1,
@@ -91,7 +90,9 @@ impl Classifier for ControlFlow {
                                 "{} removed at old lines {}–{}",
                                 kind, range.0, range.1
                             ),
-                            source: Source::Heuristic { name: "control_flow".into() },
+                            source: Source::Heuristic {
+                                name: "control_flow".into(),
+                            },
                             focus_lines: Some(FocusLines {
                                 start: range.0,
                                 end: range.1,
@@ -185,8 +186,14 @@ mod tests {
         });
         let hunk = Hunk {
             id: HunkId("test:1".into()),
-            old_range: LineRange { start: 1, count: old.lines().count() as u32 },
-            new_range: LineRange { start: 1, count: new.lines().count() as u32 },
+            old_range: LineRange {
+                start: 1,
+                count: old.lines().count() as u32,
+            },
+            new_range: LineRange {
+                start: 1,
+                count: new.lines().count() as u32,
+            },
             old_lines: old.lines().map(|s| s.to_string()).collect(),
             new_lines: new.lines().map(|s| s.to_string()).collect(),
             added: added.len() as u32,
@@ -194,8 +201,12 @@ mod tests {
             added_lines: added,
             removed_lines: removed,
         };
-        let mut file =
-            FileDiff::for_test(path, FileStatus::Modified, Some(language), vec![hunk.clone()]);
+        let mut file = FileDiff::for_test(
+            path,
+            FileStatus::Modified,
+            Some(language),
+            vec![hunk.clone()],
+        );
         file.old_content = Some(old.to_string());
         file.new_content = Some(new.to_string());
         (file, hunk)
@@ -276,7 +287,13 @@ mod tests {
     fn javascript_added_switch() {
         let old = "function f(x) { return x; }\n";
         let new = "function f(x) {\n    switch (x) {\n        case 1: return 1;\n    }\n    return x;\n}\n";
-        let (mut f, h) = fixture(Language::JavaScript, old, new, vec![1, 2, 3, 4, 5, 6], vec![1]);
+        let (mut f, h) = fixture(
+            Language::JavaScript,
+            old,
+            new,
+            vec![1, 2, 3, 4, 5, 6],
+            vec![1],
+        );
         assert!(ControlFlow::new().classify(&mut f, &h).is_some());
     }
 

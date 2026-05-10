@@ -62,8 +62,10 @@ impl Classifier for CommentOnly {
 
         // Filter out blank lines from the changed-line check; they don't
         // need to be inside a comment.
-        let removed_non_blank = non_blank_lines(&hunk.removed_lines, &hunk.old_lines, hunk.old_range.start);
-        let added_non_blank = non_blank_lines(&hunk.added_lines, &hunk.new_lines, hunk.new_range.start);
+        let removed_non_blank =
+            non_blank_lines(&hunk.removed_lines, &hunk.old_lines, hunk.old_range.start);
+        let added_non_blank =
+            non_blank_lines(&hunk.added_lines, &hunk.new_lines, hunk.new_range.start);
 
         if !lines_all_within(&removed_non_blank, &old_ranges) {
             return None;
@@ -76,7 +78,9 @@ impl Classifier for CommentOnly {
             level: Level::Skip,
             category: Category::CommentOnly,
             rationale: "comment/docstring-only change".into(),
-            source: Source::Heuristic { name: "comment_only".into() },
+            source: Source::Heuristic {
+                name: "comment_only".into(),
+            },
             focus_lines: None,
         })
     }
@@ -91,7 +95,10 @@ fn comment_ranges(language: Language, tree: &Tree) -> Vec<(u32, u32)> {
 }
 
 fn is_comment_node(kind: &str) -> bool {
-    matches!(kind, "comment" | "line_comment" | "block_comment" | "doc_comment")
+    matches!(
+        kind,
+        "comment" | "line_comment" | "block_comment" | "doc_comment"
+    )
 }
 
 /// Filter `lines` to those whose corresponding source line is non-blank.
@@ -161,8 +168,14 @@ mod tests {
         });
         let hunk = Hunk {
             id: HunkId("test:1".into()),
-            old_range: LineRange { start: 1, count: old.lines().count() as u32 },
-            new_range: LineRange { start: 1, count: new.lines().count() as u32 },
+            old_range: LineRange {
+                start: 1,
+                count: old.lines().count() as u32,
+            },
+            new_range: LineRange {
+                start: 1,
+                count: new.lines().count() as u32,
+            },
             old_lines: old.lines().map(|s| s.to_string()).collect(),
             new_lines: new.lines().map(|s| s.to_string()).collect(),
             added: added.len() as u32,
@@ -170,7 +183,12 @@ mod tests {
             added_lines: added,
             removed_lines: removed,
         };
-        let mut file = FileDiff::for_test(path, FileStatus::Modified, Some(language), vec![hunk.clone()]);
+        let mut file = FileDiff::for_test(
+            path,
+            FileStatus::Modified,
+            Some(language),
+            vec![hunk.clone()],
+        );
         file.old_content = Some(old.to_string());
         file.new_content = Some(new.to_string());
         (file, hunk)
@@ -242,7 +260,10 @@ mod tests {
         let new = "\"\"\"new docs\"\"\"\ndef a():\n    return 1\n";
         let (mut f, h) = fixture(Language::Python, old, new, vec![1], vec![1]);
         let result = CommentOnly::new().classify(&mut f, &h);
-        assert!(result.is_some(), "module docstring change should classify as comment-only");
+        assert!(
+            result.is_some(),
+            "module docstring change should classify as comment-only"
+        );
     }
 
     #[test]

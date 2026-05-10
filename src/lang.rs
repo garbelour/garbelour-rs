@@ -47,26 +47,50 @@ mod tests {
 
     #[test]
     fn detects_rust() {
-        assert_eq!(Language::detect(Path::new("src/main.rs")), Some(Language::Rust));
+        assert_eq!(
+            Language::detect(Path::new("src/main.rs")),
+            Some(Language::Rust)
+        );
     }
 
     #[test]
     fn detects_python() {
-        assert_eq!(Language::detect(Path::new("foo.py")), Some(Language::Python));
-        assert_eq!(Language::detect(Path::new("foo.pyi")), Some(Language::Python));
+        assert_eq!(
+            Language::detect(Path::new("foo.py")),
+            Some(Language::Python)
+        );
+        assert_eq!(
+            Language::detect(Path::new("foo.pyi")),
+            Some(Language::Python)
+        );
     }
 
     #[test]
     fn detects_typescript() {
-        assert_eq!(Language::detect(Path::new("a/b.ts")), Some(Language::TypeScript));
-        assert_eq!(Language::detect(Path::new("a/b.tsx")), Some(Language::TypeScript));
-        assert_eq!(Language::detect(Path::new("a/b.mts")), Some(Language::TypeScript));
+        assert_eq!(
+            Language::detect(Path::new("a/b.ts")),
+            Some(Language::TypeScript)
+        );
+        assert_eq!(
+            Language::detect(Path::new("a/b.tsx")),
+            Some(Language::TypeScript)
+        );
+        assert_eq!(
+            Language::detect(Path::new("a/b.mts")),
+            Some(Language::TypeScript)
+        );
     }
 
     #[test]
     fn detects_javascript() {
-        assert_eq!(Language::detect(Path::new("a/b.js")), Some(Language::JavaScript));
-        assert_eq!(Language::detect(Path::new("a/b.cjs")), Some(Language::JavaScript));
+        assert_eq!(
+            Language::detect(Path::new("a/b.js")),
+            Some(Language::JavaScript)
+        );
+        assert_eq!(
+            Language::detect(Path::new("a/b.cjs")),
+            Some(Language::JavaScript)
+        );
     }
 
     #[test]

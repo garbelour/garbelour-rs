@@ -18,8 +18,8 @@ pub mod llm;
 pub mod render;
 
 pub use classify::{
-    Category, Classification, Classified, Classifier, FocusLines, Level, Pipeline,
-    PipelineConfig, Side, Source, Unclassified,
+    Category, Classification, Classified, Classifier, FocusLines, Level, Pipeline, PipelineConfig,
+    Side, Source, Unclassified,
 };
 pub use diff::{Diff, FileDiff, FileStatus, Hunk, HunkId, LineRange};
 pub use lang::Language;

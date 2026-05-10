@@ -35,11 +35,10 @@ impl Classifier for SizeThreshold {
             Some(Classification {
                 level: Level::Review,
                 category: Category::LargeChange,
-                rationale: format!(
-                    "{} changed lines (>{} threshold)",
-                    changed, self.threshold
-                ),
-                source: Source::Heuristic { name: "size_threshold".into() },
+                rationale: format!("{} changed lines (>{} threshold)", changed, self.threshold),
+                source: Source::Heuristic {
+                    name: "size_threshold".into(),
+                },
                 focus_lines: None,
             })
         } else {
@@ -58,8 +57,14 @@ mod tests {
     fn hunk(added: u32, removed: u32) -> Hunk {
         Hunk {
             id: HunkId("test:1".into()),
-            old_range: LineRange { start: 1, count: removed },
-            new_range: LineRange { start: 1, count: added },
+            old_range: LineRange {
+                start: 1,
+                count: removed,
+            },
+            new_range: LineRange {
+                start: 1,
+                count: added,
+            },
             old_lines: (0..removed).map(|i| format!("old{i}")).collect(),
             new_lines: (0..added).map(|i| format!("new{i}")).collect(),
             added,
@@ -70,7 +75,12 @@ mod tests {
     }
 
     fn file() -> FileDiff {
-        FileDiff::for_test(PathBuf::from("src/x.rs"), FileStatus::Modified, None, vec![])
+        FileDiff::for_test(
+            PathBuf::from("src/x.rs"),
+            FileStatus::Modified,
+            None,
+            vec![],
+        )
     }
 
     #[test]

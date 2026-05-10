@@ -25,8 +25,7 @@ pub struct Lockfile {
 
 impl Lockfile {
     pub fn new(extra: Vec<String>) -> Self {
-        let mut names: HashSet<String> =
-            DEFAULT_NAMES.iter().map(|s| (*s).to_string()).collect();
+        let mut names: HashSet<String> = DEFAULT_NAMES.iter().map(|s| (*s).to_string()).collect();
         names.extend(extra);
         Self { names }
     }
@@ -48,7 +47,9 @@ impl Classifier for Lockfile {
                 level: Level::Skip,
                 category: Category::Lockfile,
                 rationale: format!("lockfile update ({})", basename),
-                source: Source::Heuristic { name: "lockfile".into() },
+                source: Source::Heuristic {
+                    name: "lockfile".into(),
+                },
                 focus_lines: None,
             })
         } else {
@@ -79,7 +80,12 @@ mod tests {
     }
 
     fn file(path: &str) -> FileDiff {
-        FileDiff::for_test(PathBuf::from(path), FileStatus::Modified, None, vec![hunk()])
+        FileDiff::for_test(
+            PathBuf::from(path),
+            FileStatus::Modified,
+            None,
+            vec![hunk()],
+        )
     }
 
     #[test]
