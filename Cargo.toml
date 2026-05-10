@@ -6,7 +6,7 @@ license = "MIT"
 repository = "https://github.com/garbelour-io/garbelour-rs"
 readme = "README.md"
 keywords = ["code-review", "github", "diff", "triage"]
-description = "Classify PR diff hunks by reviewer attention: review, skim, or skip"
+description = "Classify PR diffs by reviewer attention: review, skim, or skip"
 
 [lib]
 name = "garbelour"
@@ -21,22 +21,22 @@ name = "integration"
 path = "tests/integration/diff_test.rs"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-anyhow = "1"
+clap = { version = "4.6.1", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+anyhow = "1.0.102"
 ureq = { version = "=3.3.0", features = ["json"] }
-sha2 = "0.10"
-hex = "0.4"
-tree-sitter = "0.26"
+sha2 = "0.11.0"
+hex = "0.4.3"
+tree-sitter = "0.26.8"
 tree-sitter-rust = "0.24"
 tree-sitter-python = "0.25"
 tree-sitter-typescript = "0.23"
 tree-sitter-javascript = "0.23"
-ignore = "0.4"
-toml = "0.8"
+ignore = "0.4.25"
+toml = "1.1.2"
 patch = "0.7"
-globset = "0.4"
+globset = "0.4.18"
 
 [profile.release]
 lto = "thin"
