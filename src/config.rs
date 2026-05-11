@@ -20,7 +20,6 @@ pub struct Github {
     pub base_url: Option<String>,
 }
 
-
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Classify {
     #[serde(default)]
@@ -40,7 +39,6 @@ pub struct Config {
     pub github: Github,
 }
 
-
 impl Config {
     /// Load a config from `path`. If the file is missing, return defaults.
     /// Parse errors are propagated.
@@ -53,7 +51,6 @@ impl Config {
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
     }
 }
-
 
 //------------------------------------------------------------------------------
 #[cfg(test)]
