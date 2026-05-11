@@ -10,14 +10,16 @@ use anyhow::Context;
 use serde::Deserialize;
 
 #[derive(Clone, Debug, Default, Deserialize)]
-pub struct Config {
-    #[serde(default)]
-    pub classify: Classify,
-    #[serde(default)]
-    pub llm: Llm,
-    #[serde(default)]
-    pub github: Github,
+pub struct Llm {
+    pub provider: Option<String>,
+    pub model: Option<String>,
 }
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Github {
+    pub base_url: Option<String>,
+}
+
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Classify {
@@ -29,15 +31,15 @@ pub struct Classify {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-pub struct Llm {
-    pub provider: Option<String>,
-    pub model: Option<String>,
+pub struct Config {
+    #[serde(default)]
+    pub classify: Classify,
+    #[serde(default)]
+    pub llm: Llm,
+    #[serde(default)]
+    pub github: Github,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct Github {
-    pub base_url: Option<String>,
-}
 
 impl Config {
     /// Load a config from `path`. If the file is missing, return defaults.
@@ -52,6 +54,8 @@ impl Config {
     }
 }
 
+
+//------------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;

@@ -157,15 +157,6 @@ pub struct PrEvent {
     pub head_sha: String,
 }
 
-/// Read `GITHUB_EVENT_PATH`, parse the JSON, and extract PR fields.
-pub fn parse_event() -> anyhow::Result<PrEvent> {
-    let path =
-        std::env::var("GITHUB_EVENT_PATH").map_err(|_| anyhow!("GITHUB_EVENT_PATH is not set"))?;
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading GITHUB_EVENT_PATH={path}"))?;
-    parse_event_json(&text)
-}
-
 pub fn parse_event_json(text: &str) -> anyhow::Result<PrEvent> {
     let v: Value = serde_json::from_str(text).context("parsing GitHub event JSON")?;
     let pr = v
@@ -208,6 +199,15 @@ pub fn parse_event_json(text: &str) -> anyhow::Result<PrEvent> {
         base_sha,
         head_sha,
     })
+}
+
+/// Read `GITHUB_EVENT_PATH`, parse the JSON, and extract PR fields.
+pub fn parse_event() -> anyhow::Result<PrEvent> {
+    let path =
+        std::env::var("GITHUB_EVENT_PATH").map_err(|_| anyhow!("GITHUB_EVENT_PATH is not set"))?;
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading GITHUB_EVENT_PATH={path}"))?;
+    parse_event_json(&text)
 }
 
 #[cfg(test)]

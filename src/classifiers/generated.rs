@@ -134,6 +134,7 @@ pub fn read_gitattributes_generated(repo_path: &std::path::Path) -> HashSet<Path
     out
 }
 
+//------------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;

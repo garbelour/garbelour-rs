@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[command(
     name = "garbelour",
     version,
-    about = "Classify PR diff hunks by reviewer attention: review, skim, or skip"
+    about = "Classify PR diffs by reviewer attention: review, skim, or skip"
 )]
 pub struct Cli {
     #[command(subcommand)]

@@ -8,21 +8,67 @@ use garbelour::cli::{Cli, ColorChoice, Command, Format, FormatChoice, ReviewArgs
 use garbelour::config::Config;
 use garbelour::{classifiers, diff, github, llm, render};
 
-fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match run(cli) {
-        Ok(code) => ExitCode::from(code),
-        Err(e) => {
-            eprintln!("garbelour: {:#}", e);
-            ExitCode::from(2_u8)
+fn build_pipeline_config(args: &ReviewArgs, config: &Config) -> PipelineConfig {
+    let mut generated_globs = config.classify.generated_globs.clone();
+    let mut lockfile_names = config.classify.lockfile_names.clone();
+    // Allow the config to extend; CLI controls only size_threshold for now.
+    generated_globs.sort();
+    generated_globs.dedup();
+    lockfile_names.sort();
+    lockfile_names.dedup();
+    let generated_paths = classifiers::generated::read_gitattributes_generated(&args.repo);
+    PipelineConfig {
+        size_threshold: config
+            .classify
+            .size_threshold
+            .unwrap_or(args.size_threshold),
+        generated_globs,
+        generated_paths,
+        lockfile_names,
+    }
+}
+
+fn resolve_format(args: &ReviewArgs) -> Format {
+    match args.format {
+        FormatChoice::Human => Format::Human,
+        FormatChoice::Markdown => Format::Markdown,
+        FormatChoice::Json => Format::Json,
+        FormatChoice::Auto => {
+            if args.post_comment {
+                Format::Markdown
+            } else if render::stdout_is_tty() {
+                Format::Human
+            } else {
+                Format::Json
+            }
         }
     }
 }
 
-fn run(cli: Cli) -> anyhow::Result<u8> {
-    match cli.command {
-        Command::Review(args) => review(args),
+fn resolve_color(args: &ReviewArgs) -> bool {
+    match args.color {
+        ColorChoice::Always => true,
+        ColorChoice::Never => false,
+        ColorChoice::Auto => render::stdout_is_tty() && std::env::var_os("NO_COLOR").is_none(),
     }
+}
+
+fn build_repo_ref(args: &ReviewArgs, event: Option<&github::PrEvent>) -> Option<render::RepoRef> {
+    let owner = args
+        .owner
+        .clone()
+        .or_else(|| event.map(|e| e.owner.clone()))?;
+    let repo = args
+        .repo_name
+        .clone()
+        .or_else(|| event.map(|e| e.repo.clone()))?;
+    let pr = args.pr.or_else(|| event.map(|e| e.pr_number))?;
+    Some(render::RepoRef {
+        host: "https://github.com".to_string(),
+        owner,
+        repo,
+        pr,
+    })
 }
 
 fn review(args: ReviewArgs) -> anyhow::Result<u8> {
@@ -56,7 +102,7 @@ fn review(args: ReviewArgs) -> anyhow::Result<u8> {
         args.head.clone()
     };
 
-    // 1. Extract diff.
+    // 1. Extract diff into Diff struct
     let mut diff = diff::extract(&args.repo, &base, &head)?;
 
     // 2. Build PipelineConfig and run heuristic pipeline.
@@ -131,65 +177,19 @@ fn review(args: ReviewArgs) -> anyhow::Result<u8> {
     Ok(0)
 }
 
-fn build_pipeline_config(args: &ReviewArgs, config: &Config) -> PipelineConfig {
-    let mut generated_globs = config.classify.generated_globs.clone();
-    let mut lockfile_names = config.classify.lockfile_names.clone();
-    // Allow the config to extend; CLI controls only size_threshold for now.
-    generated_globs.sort();
-    generated_globs.dedup();
-    lockfile_names.sort();
-    lockfile_names.dedup();
-    let generated_paths = classifiers::generated::read_gitattributes_generated(&args.repo);
-    PipelineConfig {
-        size_threshold: config
-            .classify
-            .size_threshold
-            .unwrap_or(args.size_threshold),
-        generated_globs,
-        generated_paths,
-        lockfile_names,
+fn run(cli: Cli) -> anyhow::Result<u8> {
+    match cli.command {
+        Command::Review(args) => review(args),
     }
 }
 
-fn resolve_format(args: &ReviewArgs) -> Format {
-    match args.format {
-        FormatChoice::Human => Format::Human,
-        FormatChoice::Markdown => Format::Markdown,
-        FormatChoice::Json => Format::Json,
-        FormatChoice::Auto => {
-            if args.post_comment {
-                Format::Markdown
-            } else if render::stdout_is_tty() {
-                Format::Human
-            } else {
-                Format::Json
-            }
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    match run(cli) {
+        Ok(code) => ExitCode::from(code),
+        Err(e) => {
+            eprintln!("garbelour: {:#}", e);
+            ExitCode::from(2_u8)
         }
     }
-}
-
-fn resolve_color(args: &ReviewArgs) -> bool {
-    match args.color {
-        ColorChoice::Always => true,
-        ColorChoice::Never => false,
-        ColorChoice::Auto => render::stdout_is_tty() && std::env::var_os("NO_COLOR").is_none(),
-    }
-}
-
-fn build_repo_ref(args: &ReviewArgs, event: Option<&github::PrEvent>) -> Option<render::RepoRef> {
-    let owner = args
-        .owner
-        .clone()
-        .or_else(|| event.map(|e| e.owner.clone()))?;
-    let repo = args
-        .repo_name
-        .clone()
-        .or_else(|| event.map(|e| e.repo.clone()))?;
-    let pr = args.pr.or_else(|| event.map(|e| e.pr_number))?;
-    Some(render::RepoRef {
-        host: "https://github.com".to_string(),
-        owner,
-        repo,
-        pr,
-    })
 }
