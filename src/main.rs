@@ -110,6 +110,8 @@ fn review(args: ReviewArgs) -> anyhow::Result<u8> {
     let pipeline = Pipeline::standard(&pipeline_config)?;
     let (mut classified, unclassified) = pipeline.run(&mut diff);
 
+    // println!("{:?}", classified);
+
     // 3. Optional LLM pass.
     if args.llm && !unclassified.is_empty() {
         let llm_config = llm::detect_provider(
