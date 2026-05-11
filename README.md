@@ -218,3 +218,12 @@ let (classified, unclassified) = pipeline.run(&mut d);
 - `focus_lines` pinpoints the specific line range that triggered each
   classification, so the markdown deep link lands on the right line, not
   just the start of the hunk.
+
+
+
+## What is New in Garbelour
+
+### 0.1.0
+
+Initial release.
+
