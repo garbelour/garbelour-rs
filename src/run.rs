@@ -149,9 +149,7 @@ fn review(args: ReviewArgs) -> anyhow::Result<u8> {
             if args.post_comment {
                 let client = github::GitHubClient::from_env()?;
                 let pr = repo_ref.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "--post-comment requires owner/repo/pr (CLI or event payload)"
-                    )
+                    anyhow::anyhow!("--post-comment requires owner/repo/pr (CLI or event payload)")
                 })?;
                 github::upsert_sticky_comment(&client, &pr.owner, &pr.repo, pr.pr, &body)?;
                 eprintln!("garbelour: posted review map to PR #{}", pr.pr);
