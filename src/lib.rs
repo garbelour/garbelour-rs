@@ -16,6 +16,7 @@ pub mod github;
 pub mod lang;
 pub mod llm;
 pub mod render;
+pub mod run;
 
 pub use classify::{
     Category, Classification, Classified, Classifier, FocusLines, Level, Pipeline, PipelineConfig,
@@ -23,3 +24,4 @@ pub use classify::{
 };
 pub use diff::{Diff, FileDiff, FileStatus, Hunk, HunkId, LineRange};
 pub use lang::Language;
+pub use run::run_cli;
