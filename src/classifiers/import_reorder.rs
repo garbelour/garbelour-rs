@@ -19,7 +19,7 @@
 use tree_sitter::Tree;
 
 use crate::ast::{lines_all_within, parse, walk};
-use crate::classify::{Category, Classification, Classifier, Level, Source};
+use crate::classify::{Category, Classifier, Finding, Level, Source};
 use crate::diff::{FileDiff, Hunk};
 use crate::lang::Language;
 
@@ -46,34 +46,44 @@ impl Classifier for ImportReorder {
         110
     }
 
-    fn classify(&self, file: &mut FileDiff, hunk: &Hunk) -> Option<Classification> {
-        let language = file.language?;
+    fn classify(&self, file: &mut FileDiff, hunk: &Hunk) -> Vec<Finding> {
+        let Some(language) = file.language else {
+            return Vec::new();
+        };
         if hunk.added_lines.is_empty() && hunk.removed_lines.is_empty() {
-            return None;
+            return Vec::new();
         }
 
         let _ = file.ensure_content();
-        let old_content = file.old_content.as_deref()?;
-        let new_content = file.new_content.as_deref()?;
-        let old_tree = parse(language, old_content)?;
-        let new_tree = parse(language, new_content)?;
+        let Some(old_content) = file.old_content.as_deref() else {
+            return Vec::new();
+        };
+        let Some(new_content) = file.new_content.as_deref() else {
+            return Vec::new();
+        };
+        let Some(old_tree) = parse(language, old_content) else {
+            return Vec::new();
+        };
+        let Some(new_tree) = parse(language, new_content) else {
+            return Vec::new();
+        };
 
         let old_imports = collect_imports(language, &old_tree, old_content.as_bytes());
         let new_imports = collect_imports(language, &new_tree, new_content.as_bytes());
 
         // Early-out: if either side has no imports, this can't be a reorder.
         if old_imports.is_empty() || new_imports.is_empty() {
-            return None;
+            return Vec::new();
         }
 
         let old_ranges: Vec<(u32, u32)> = old_imports.iter().map(|i| i.lines).collect();
         let new_ranges: Vec<(u32, u32)> = new_imports.iter().map(|i| i.lines).collect();
 
         if !lines_all_within(&hunk.removed_lines, &old_ranges) {
-            return None;
+            return Vec::new();
         }
         if !lines_all_within(&hunk.added_lines, &new_ranges) {
-            return None;
+            return Vec::new();
         }
 
         // Same multiset, different order = reorder. Comparing sorted Vecs is
@@ -86,15 +96,15 @@ impl Classifier for ImportReorder {
         new_texts.sort();
 
         if old_texts != new_texts {
-            return None;
+            return Vec::new();
         }
         if original_old == original_new {
             // Imports unchanged in content AND order. Hunk must be touching
             // something else (whitespace?) — defer.
-            return None;
+            return Vec::new();
         }
 
-        Some(Classification {
+        vec![Finding {
             level: Level::Skip,
             category: Category::ImportReorder,
             rationale: "imports reordered, no semantic change".into(),
@@ -102,7 +112,7 @@ impl Classifier for ImportReorder {
                 name: "import_reorder".into(),
             },
             focus_lines: None,
-        })
+        }]
     }
 }
 
@@ -200,9 +210,10 @@ mod tests {
         let old = "use foo::bar;\nuse foo::baz;\nfn main() {}\n";
         let new = "use foo::baz;\nuse foo::bar;\nfn main() {}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![1, 2], vec![1, 2]);
-        let result = ImportReorder::new().classify(&mut f, &h).unwrap();
-        assert_eq!(result.category, Category::ImportReorder);
-        assert_eq!(result.level, Level::Skip);
+        let result = ImportReorder::new().classify(&mut f, &h);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].category, Category::ImportReorder);
+        assert_eq!(result[0].level, Level::Skip);
     }
 
     #[test]
@@ -210,7 +221,7 @@ mod tests {
         let old = "use foo::bar;\nfn main() {}\n";
         let new = "use foo::bar;\nuse foo::baz;\nfn main() {}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![2], vec![]);
-        assert!(ImportReorder::new().classify(&mut f, &h).is_none());
+        assert!(ImportReorder::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -218,7 +229,7 @@ mod tests {
         let old = "use foo::bar;\nuse foo::baz;\nfn main() {}\n";
         let new = "use foo::bar;\nuse foo::qux;\nfn main() {}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![2], vec![2]);
-        assert!(ImportReorder::new().classify(&mut f, &h).is_none());
+        assert!(ImportReorder::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -227,7 +238,7 @@ mod tests {
         let new = "use foo::b;\nuse foo::a;\nfn main() { 2 }\n";
         // Hunk touches both import lines (1, 2) AND the body change at line 3.
         let (mut f, h) = fixture(Language::Rust, old, new, vec![1, 2, 3], vec![1, 2, 3]);
-        assert!(ImportReorder::new().classify(&mut f, &h).is_none());
+        assert!(ImportReorder::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -235,7 +246,7 @@ mod tests {
         let old = "import os\nimport sys\n\nprint(1)\n";
         let new = "import sys\nimport os\n\nprint(1)\n";
         let (mut f, h) = fixture(Language::Python, old, new, vec![1, 2], vec![1, 2]);
-        assert!(ImportReorder::new().classify(&mut f, &h).is_some());
+        assert!(!ImportReorder::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -243,7 +254,7 @@ mod tests {
         let old = "from a import x\nfrom b import y\n\nprint(1)\n";
         let new = "from b import y\nfrom a import x\n\nprint(1)\n";
         let (mut f, h) = fixture(Language::Python, old, new, vec![1, 2], vec![1, 2]);
-        assert!(ImportReorder::new().classify(&mut f, &h).is_some());
+        assert!(!ImportReorder::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -251,7 +262,7 @@ mod tests {
         let old = "import { a } from 'a';\nimport { b } from 'b';\n\nexport const x = 1;\n";
         let new = "import { b } from 'b';\nimport { a } from 'a';\n\nexport const x = 1;\n";
         let (mut f, h) = fixture(Language::TypeScript, old, new, vec![1, 2], vec![1, 2]);
-        assert!(ImportReorder::new().classify(&mut f, &h).is_some());
+        assert!(!ImportReorder::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -259,7 +270,7 @@ mod tests {
         let old = "import a from 'a';\nimport b from 'b';\n\nconst x = 1;\n";
         let new = "import b from 'b';\nimport a from 'a';\n\nconst x = 1;\n";
         let (mut f, h) = fixture(Language::JavaScript, old, new, vec![1, 2], vec![1, 2]);
-        assert!(ImportReorder::new().classify(&mut f, &h).is_some());
+        assert!(!ImportReorder::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -268,6 +279,6 @@ mod tests {
         let new = "use bar;\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![1], vec![1]);
         f.language = None;
-        assert!(ImportReorder::new().classify(&mut f, &h).is_none());
+        assert!(ImportReorder::new().classify(&mut f, &h).is_empty());
     }
 }

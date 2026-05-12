@@ -9,9 +9,9 @@
 use serde_json::{json, Value};
 
 use crate::classify::{
-    Category, Classification, Classified, FocusLines, Level, Side, Source, Unclassified,
+    Category, Finding, FocusLines, HunkFindings, Level, Side, Source, Unclassified,
 };
-use crate::diff::{HunkId, LineRange};
+use crate::diff::HunkId;
 
 /// Maximum approximate prompt size per request, in bytes. Larger than
 /// disclude's 6KB because diff hunks include both pre- and post-image
@@ -140,13 +140,14 @@ const SYSTEM_PROMPT: &str = "Your job is to identify the code that matters: \
     Bad: 'Verify the new variant doesn't break downstream consumers.'";
 
 /// Top-level entry: classify all unclassified hunks, returning one
-/// `Classified` per hunk the model was able to assess. Hunks the model
-/// failed to return a verdict for are silently dropped — main.rs falls
+/// `HunkFindings` per hunk the model assessed. Each hunk may have multiple
+/// findings if the LLM flagged independent concerns. Hunks the model
+/// failed to return any verdict for are silently dropped — main.rs falls
 /// back to the default level for those.
 pub fn classify_hunks(
     hunks: &[Unclassified],
     config: &LlmConfig,
-) -> anyhow::Result<Vec<Classified>> {
+) -> anyhow::Result<Vec<HunkFindings>> {
     let mut out = Vec::new();
     for batch in build_batches(hunks) {
         let user = build_prompt(batch);
@@ -218,6 +219,8 @@ pub fn build_prompt(batch: &[Unclassified]) -> String {
         "      \"rationale\": \"one sentence referencing the focus lines\"\n",
         "    }\n  ]\n}\n\n",
         "For review and skim verdicts, set focus_start and focus_end to the post-image (+) line numbers of the most important region. For skip verdicts, set both to null.\n",
+        "\n",
+        "A hunk MAY appear more than once in `verdicts` if it has multiple independent concerns at different line regions (e.g. a public-API change AND an unrelated control-flow change in the same hunk). Each repeat verdict for the same id should describe a different region with its own focus_start/focus_end and rationale. Emit at most 3 verdicts per hunk.\n",
     ));
     out
 }
@@ -274,7 +277,7 @@ fn call_openai_compat(system: &str, user: &str, config: &LlmConfig) -> anyhow::R
         .to_string())
 }
 
-pub fn parse_response(raw: &str, batch: &[Unclassified], config: &LlmConfig) -> Vec<Classified> {
+pub fn parse_response(raw: &str, batch: &[Unclassified], config: &LlmConfig) -> Vec<HunkFindings> {
     let json_str = extract_json(raw);
     let parsed: Value = match serde_json::from_str(json_str) {
         Ok(v) => v,
@@ -291,14 +294,21 @@ pub fn parse_response(raw: &str, batch: &[Unclassified], config: &LlmConfig) -> 
         }
     };
 
-    // Map hunk_id → index for quick lookup and so we ignore stray ids.
+    // Map hunk_id → input. Unknown ids are dropped.
     let mut by_id: std::collections::HashMap<&str, &Unclassified> =
         std::collections::HashMap::new();
     for u in batch {
         by_id.insert(u.hunk_id.0.as_str(), u);
     }
 
-    let mut out = Vec::new();
+    // Bucket verdicts by hunk_id so multiple verdicts for one hunk roll
+    // into one HunkFindings. Preserve verdict arrival order within a hunk
+    // and preserve first-seen order across hunks (so output matches batch
+    // ordering as much as possible).
+    let mut order: Vec<String> = Vec::new();
+    let mut buckets: std::collections::HashMap<String, (HunkId, &Unclassified, Vec<Finding>)> =
+        std::collections::HashMap::new();
+
     for item in arr {
         let id = match item["id"].as_str() {
             Some(s) => s,
@@ -325,26 +335,37 @@ pub fn parse_response(raw: &str, batch: &[Unclassified], config: &LlmConfig) -> 
         };
         let rationale = item["rationale"].as_str().unwrap_or("").to_string();
 
-        out.push(Classified {
-            hunk_id: HunkId(id.to_string()),
-            file_path: u.file_path.clone(),
-            new_range: LineRange {
-                start: u.new_range.start,
-                count: u.new_range.count,
+        let finding = Finding {
+            level,
+            category: Category::LlmAssessed,
+            rationale,
+            source: Source::Llm {
+                provider: config.provider.name().to_string(),
+                model: config.model.clone(),
             },
-            classification: Classification {
-                level,
-                category: Category::LlmAssessed,
-                rationale,
-                source: Source::Llm {
-                    provider: config.provider.name().to_string(),
-                    model: config.model.clone(),
-                },
-                focus_lines,
-            },
-        });
+            focus_lines,
+        };
+
+        let key = id.to_string();
+        if let Some(bucket) = buckets.get_mut(&key) {
+            bucket.2.push(finding);
+        } else {
+            order.push(key.clone());
+            buckets.insert(key, (HunkId(id.to_string()), u, vec![finding]));
+        }
     }
-    out
+
+    order
+        .into_iter()
+        .filter_map(|k| buckets.remove(&k))
+        .map(|(hunk_id, u, findings)| HunkFindings {
+            hunk_id,
+            file_path: u.file_path.clone(),
+            old_range: u.old_range.clone(),
+            new_range: u.new_range.clone(),
+            findings,
+        })
+        .collect()
 }
 
 pub fn extract_json_for_consolidation(s: &str) -> &str {
@@ -444,12 +465,13 @@ mod tests {
         let batch = vec![unclassified("a:1", "src/x.rs", 1)];
         let out = parse_response(raw, &batch, &config());
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].classification.level, Level::Review);
-        let f = out[0].classification.focus_lines.as_ref().unwrap();
+        assert_eq!(out[0].findings.len(), 1);
+        assert_eq!(out[0].findings[0].level, Level::Review);
+        let f = out[0].findings[0].focus_lines.as_ref().unwrap();
         assert_eq!((f.start, f.end), (3, 7));
         assert_eq!(f.side, Side::New);
-        assert_eq!(out[0].classification.rationale, "new branch");
-        match &out[0].classification.source {
+        assert_eq!(out[0].findings[0].rationale, "new branch");
+        match &out[0].findings[0].source {
             Source::Llm { provider, model } => {
                 assert_eq!(provider, "Anthropic");
                 assert_eq!(model, "test-model");
@@ -464,8 +486,8 @@ mod tests {
         let batch = vec![unclassified("a:1", "src/x.rs", 1)];
         let out = parse_response(raw, &batch, &config());
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].classification.level, Level::Skip);
-        assert!(out[0].classification.focus_lines.is_none());
+        assert_eq!(out[0].findings[0].level, Level::Skip);
+        assert!(out[0].findings[0].focus_lines.is_none());
     }
 
     #[test]
@@ -473,7 +495,7 @@ mod tests {
         let raw = r#"{"verdicts":[{"id":"a:1","level":"???","focus_start":null,"focus_end":null,"rationale":"x"}]}"#;
         let batch = vec![unclassified("a:1", "src/x.rs", 1)];
         let out = parse_response(raw, &batch, &config());
-        assert_eq!(out[0].classification.level, Level::Skim);
+        assert_eq!(out[0].findings[0].level, Level::Skim);
     }
 
     #[test]
@@ -490,6 +512,24 @@ mod tests {
         let batch = vec![unclassified("a:1", "src/x.rs", 1)];
         let out = parse_response(raw, &batch, &config());
         assert_eq!(out.len(), 1);
+    }
+
+    /// Two verdicts under the same id roll into one HunkFindings with two
+    /// findings, preserving arrival order.
+    #[test]
+    fn parse_response_buckets_multiple_verdicts_per_id() {
+        let raw = r#"{"verdicts":[
+            {"id":"a:1","level":"review","focus_start":1,"focus_end":3,"rationale":"contract change"},
+            {"id":"a:1","level":"skim","focus_start":5,"focus_end":6,"rationale":"unrelated side effect"}
+        ]}"#;
+        let batch = vec![unclassified("a:1", "src/x.rs", 1)];
+        let out = parse_response(raw, &batch, &config());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].findings.len(), 2);
+        assert_eq!(out[0].findings[0].level, Level::Review);
+        assert_eq!(out[0].findings[0].rationale, "contract change");
+        assert_eq!(out[0].findings[1].level, Level::Skim);
+        assert_eq!(out[0].findings[1].rationale, "unrelated side effect");
     }
 
     #[test]

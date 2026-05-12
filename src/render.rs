@@ -1,8 +1,9 @@
 //! Output rendering: human (terminal), markdown (sticky comment), json.
 //!
-//! All three renderers operate on `&[ConsolidatedItem]`, where each item
-//! carries one or more `Location`s. Multi-location items are rendered with
-//! a comma-separated locator list and a single shared rationale.
+//! All three renderers operate on `&[Item]`. Each item is a finding cluster
+//! anchored at one (file, side, range) and may contain multiple findings,
+//! each with its own level/category/rationale. The renderer's job is to
+//! present one anchor per item plus a per-finding sub-list.
 
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
@@ -10,12 +11,12 @@ use std::io::IsTerminal;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::classify::{Category, FocusLines, Level, Side, Source};
-use crate::consolidate::{ConsolidatedItem, Location};
+use crate::classify::{Category, Finding, FocusLines, Level, Side, Source};
+use crate::consolidate::Item;
 use crate::diff::Diff;
 
-/// Counts at each level. `total` is the number of consolidated items (after
-/// dedup/merge), not the underlying hunk count.
+/// Counts at each level. `total` is the number of items (after consolidation),
+/// not the underlying finding or hunk count.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Summary {
     pub total: usize,
@@ -25,11 +26,11 @@ pub struct Summary {
 }
 
 impl Summary {
-    pub fn from_items(items: &[ConsolidatedItem]) -> Self {
+    pub fn from_items(items: &[Item]) -> Self {
         let mut s = Summary::default();
         for c in items {
             s.total += 1;
-            match c.level {
+            match c.level() {
                 Level::Review => s.review += 1,
                 Level::Skim => s.skim += 1,
                 Level::Skip => s.skip += 1,
@@ -39,7 +40,7 @@ impl Summary {
     }
 }
 
-pub fn summary_line(items: &[ConsolidatedItem]) -> String {
+pub fn summary_line(items: &[Item]) -> String {
     let s = Summary::from_items(items);
     format!(
         "garbelour: {} of {} hunks need review, {} worth skimming, {} mechanical",
@@ -51,19 +52,25 @@ pub fn summary_line(items: &[ConsolidatedItem]) -> String {
 
 /// Terminal-friendly report. Sections: Review (always), Skim (if any), Skip
 /// (grouped by category). When `use_color` is true, ANSI escape codes color
-/// the section headers and file:line columns.
-pub fn human(_diff: &Diff, items: &[ConsolidatedItem], use_color: bool) -> String {
+/// the section headers and file:line columns. Items in Review/Skim that
+/// contain multiple findings render as a header line + indented sub-bullets,
+/// one per additional finding.
+pub fn human(_diff: &Diff, items: &[Item], use_color: bool) -> String {
     let mut review = Vec::new();
     let mut skim = Vec::new();
     let mut skip: BTreeMap<Category, Vec<String>> = BTreeMap::new();
     for c in items {
-        match c.level {
+        match c.level() {
             Level::Review => review.push(c),
             Level::Skim => skim.push(c),
             Level::Skip => {
-                let entry = skip.entry(c.category).or_default();
-                for loc in &c.locations {
-                    entry.push(loc.file_path.display().to_string());
+                // Each Skip item rolls into the per-category file-count
+                // summary, once per location. Use the headline finding's
+                // category to pick the bucket.
+                let category = c.headline_finding().category;
+                let entry = skip.entry(category).or_default();
+                for _loc in &c.locations {
+                    entry.push(c.file_path.display().to_string());
                 }
             }
         }
@@ -100,7 +107,7 @@ pub fn human(_diff: &Diff, items: &[ConsolidatedItem], use_color: bool) -> Strin
 fn push_section(
     out: &mut String,
     title: &str,
-    items: &[&ConsolidatedItem],
+    items: &[&Item],
     use_color: bool,
     section_color: Color,
 ) {
@@ -125,44 +132,94 @@ fn push_section(
         }
         out.push_str(&left);
         out.push_str(&pad);
-        out.push_str(&c.rationale);
+        let findings = sorted_findings(c);
+        let head = findings[0];
+        out.push_str(&head.rationale);
         out.push('\n');
+        // Sub-bullets for any additional findings.
+        let indent = " ".repeat(max + 4 + 4);
+        for f in &findings[1..] {
+            let chip = level_chip(f.level);
+            let label = category_label(f.category);
+            let chip_color = level_color(f.level);
+            let mut line = format!("↳ [{chip}] {label}: {}", f.rationale);
+            if use_color {
+                line = colorize(&line, chip_color);
+            }
+            out.push_str(&indent);
+            out.push_str(&line);
+            out.push('\n');
+        }
     }
 }
 
-/// Build a single locator string for the human renderer. Multi-location
-/// items render as `file:L1, file:L2, ...`, falling back to bare path
-/// elision (`file:L1, :L2`) when all locations share the same file.
-fn human_locator(c: &ConsolidatedItem) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    let first_path = c.primary().file_path.display().to_string();
-    for (i, loc) in c.locations.iter().enumerate() {
-        let path_str = loc.file_path.display().to_string();
-        let path_part = if i > 0 && path_str == first_path {
-            String::new()
-        } else {
-            path_str
-        };
-        parts.push(format!("{}{}", path_part, line_suffix(loc)));
+/// Findings sorted for display: descending level (Review first), then by
+/// focus_lines.start ascending, then heuristic before LLM.
+fn sorted_findings(item: &Item) -> Vec<&Finding> {
+    let mut v: Vec<&Finding> = item.findings.iter().collect();
+    v.sort_by(|a, b| {
+        b.level
+            .cmp(&a.level)
+            .then_with(|| focus_start(a).cmp(&focus_start(b)))
+            .then_with(|| source_rank(&a.source).cmp(&source_rank(&b.source)))
+    });
+    v
+}
+
+fn focus_start(f: &Finding) -> u32 {
+    f.focus_lines.as_ref().map(|x| x.start).unwrap_or(u32::MAX)
+}
+
+fn source_rank(s: &Source) -> u8 {
+    match s {
+        Source::Heuristic { .. } => 0,
+        Source::Llm { .. } => 1,
+    }
+}
+
+fn level_chip(level: Level) -> &'static str {
+    match level {
+        Level::Review => "REVIEW",
+        Level::Skim => "SKIM",
+        Level::Skip => "SKIP",
+    }
+}
+
+fn level_color(level: Level) -> Color {
+    match level {
+        Level::Review => Color::Red,
+        Level::Skim => Color::Yellow,
+        Level::Skip => Color::Dim,
+    }
+}
+
+/// Build a single locator string for the human renderer. The item supplies
+/// its merged range; if there are additional locations (Stage-B merge), they
+/// append as `:Lx` suffixes with the path elided when it matches the item's
+/// own file.
+fn human_locator(c: &Item) -> String {
+    let path_str = c.file_path.display().to_string();
+    let side_suffix = match c.side {
+        Side::Old => " (old)",
+        Side::New => "",
+    };
+    let primary = if c.range.start == c.range.end {
+        format!("{}:{}{}", path_str, c.range.start, side_suffix)
+    } else {
+        format!(
+            "{}:{}–{}{}",
+            path_str, c.range.start, c.range.end, side_suffix
+        )
+    };
+    if c.locations.len() <= 1 {
+        return primary;
+    }
+    // Stage-B-merged items: append extra-location starts (path elided).
+    let mut parts = vec![primary];
+    for loc in c.locations.iter().skip(1) {
+        parts.push(format!(":{}", loc.new_range.start));
     }
     parts.join(", ")
-}
-
-fn line_suffix(loc: &Location) -> String {
-    match &loc.focus_lines {
-        Some(FocusLines { start, end, side }) => {
-            let s = match side {
-                Side::Old => " (old)",
-                Side::New => "",
-            };
-            if start == end {
-                format!(":{}{}", start, s)
-            } else {
-                format!(":{}–{}{}", start, end, s)
-            }
-        }
-        None => format!(":{}", loc.new_range.start),
-    }
 }
 
 fn preview_paths(paths: &[&String]) -> String {
@@ -241,20 +298,21 @@ pub const STICKY_MARKER: &str = "<!-- garbelour:sticky -->";
 /// Build the GitHub sticky-comment body. `repo_ref` carries the owner/repo/pr
 /// triple needed for deep links; if `None`, links are omitted (so the
 /// rendered markdown is still readable when invoked outside GitHub).
-pub fn markdown(_diff: &Diff, items: &[ConsolidatedItem], repo_ref: Option<&RepoRef>) -> String {
+pub fn markdown(_diff: &Diff, items: &[Item], repo_ref: Option<&RepoRef>) -> String {
     let s = Summary::from_items(items);
 
     let mut review = Vec::new();
     let mut skim = Vec::new();
     let mut skip: BTreeMap<Category, Vec<String>> = BTreeMap::new();
     for c in items {
-        match c.level {
+        match c.level() {
             Level::Review => review.push(c),
             Level::Skim => skim.push(c),
             Level::Skip => {
-                let entry = skip.entry(c.category).or_default();
-                for loc in &c.locations {
-                    entry.push(loc.file_path.display().to_string());
+                let category = c.headline_finding().category;
+                let entry = skip.entry(category).or_default();
+                for _loc in &c.locations {
+                    entry.push(c.file_path.display().to_string());
                 }
             }
         }
@@ -304,53 +362,60 @@ pub fn markdown(_diff: &Diff, items: &[ConsolidatedItem], repo_ref: Option<&Repo
     out
 }
 
-fn markdown_item(c: &ConsolidatedItem, repo_ref: Option<&RepoRef>) -> String {
-    let primary_path = c.primary().file_path.display().to_string();
-    let parts: Vec<String> = c
-        .locations
-        .iter()
-        .enumerate()
-        .map(|(i, loc)| markdown_locator(loc, repo_ref, i, &primary_path))
-        .collect();
-    format!("- {}: {}\n", parts.join(", "), c.rationale)
+fn markdown_item(c: &Item, repo_ref: Option<&RepoRef>) -> String {
+    let findings = sorted_findings(c);
+    let anchor = markdown_anchor(c, repo_ref);
+    let head = findings[0];
+    let mut out = String::new();
+    if findings.len() == 1 {
+        out.push_str(&format!("- {}: {}\n", anchor, head.rationale));
+    } else {
+        out.push_str(&format!("- {}:\n", anchor));
+        for f in &findings {
+            out.push_str(&format!(
+                "  - **{}** *({})*: {}\n",
+                level_chip(f.level),
+                category_label(f.category),
+                f.rationale
+            ));
+        }
+    }
+    out
 }
 
-fn markdown_locator(
-    loc: &Location,
-    repo_ref: Option<&RepoRef>,
-    idx: usize,
-    primary_path: &str,
-) -> String {
-    let (display_line, target_line, side) = match &loc.focus_lines {
-        Some(f) => {
-            let display = if f.start == f.end {
-                format!("{}", f.start)
-            } else {
-                format!("{}–{}", f.start, f.end)
-            };
-            (display, f.start, f.side)
-        }
-        None => (
-            loc.new_range.start.to_string(),
-            loc.new_range.start,
-            Side::New,
-        ),
-    };
-    let path_str = loc.file_path.display().to_string();
-    let shown_path = if idx > 0 && path_str == primary_path {
-        String::new()
+fn markdown_anchor(c: &Item, repo_ref: Option<&RepoRef>) -> String {
+    let path_str = c.file_path.display().to_string();
+    let display_line = if c.range.start == c.range.end {
+        format!("{}", c.range.start)
     } else {
-        path_str.clone()
+        format!("{}–{}", c.range.start, c.range.end)
     };
-    let label = format!("`{}:{}`", shown_path, display_line);
-    match repo_ref {
-        Some(r) => format!(
+    let mut primary_label = format!("`{}:{}`", path_str, display_line);
+    if let Some(r) = repo_ref {
+        primary_label = format!(
             "[{}]({})",
-            label,
-            deep_link(r, &path_str, target_line, side)
-        ),
-        None => label,
+            primary_label,
+            deep_link(r, &path_str, c.range.start, c.side)
+        );
     }
+    if c.locations.len() <= 1 {
+        return primary_label;
+    }
+    let mut parts = vec![primary_label];
+    for loc in c.locations.iter().skip(1) {
+        let label = format!("`:{}`", loc.new_range.start);
+        let part = if let Some(r) = repo_ref {
+            format!(
+                "[{}]({})",
+                label,
+                deep_link(r, &path_str, loc.new_range.start, c.side)
+            )
+        } else {
+            label
+        };
+        parts.push(part);
+    }
+    parts.join(", ")
 }
 
 #[derive(Clone, Debug)]
@@ -385,6 +450,7 @@ pub fn diff_anchor(path: &str, line: u32, side: Side) -> String {
 
 #[derive(Serialize)]
 struct JsonReport<'a> {
+    schema_version: u32,
     base_sha: &'a str,
     head_sha: &'a str,
     items: Vec<JsonItem<'a>>,
@@ -394,18 +460,33 @@ struct JsonReport<'a> {
 #[derive(Serialize)]
 struct JsonItem<'a> {
     level: Level,
+    file: String,
+    side: Side,
+    range: JsonRange,
+    findings: Vec<JsonFinding<'a>>,
+    locations: Vec<JsonLocation<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonRange {
+    start: u32,
+    end: u32,
+}
+
+#[derive(Serialize)]
+struct JsonFinding<'a> {
+    level: Level,
     category: Category,
     rationale: &'a str,
     source: &'a Source,
-    locations: Vec<JsonLocation<'a>>,
+    focus_lines: &'a Option<FocusLines>,
 }
 
 #[derive(Serialize)]
 struct JsonLocation<'a> {
     hunk_id: &'a str,
-    file: String,
-    line: u32,
-    focus_lines: &'a Option<FocusLines>,
+    new_line: u32,
+    old_line: u32,
 }
 
 #[derive(Serialize)]
@@ -416,28 +497,42 @@ struct JsonSummary {
     skip: usize,
 }
 
-pub fn json(diff: &Diff, items: &[ConsolidatedItem]) -> anyhow::Result<String> {
+pub fn json(diff: &Diff, items: &[Item]) -> anyhow::Result<String> {
     let summary = Summary::from_items(items);
     let json_items: Vec<JsonItem> = items
         .iter()
         .map(|c| JsonItem {
-            level: c.level,
-            category: c.category,
-            rationale: &c.rationale,
-            source: &c.source,
+            level: c.level(),
+            file: c.file_path.display().to_string(),
+            side: c.side,
+            range: JsonRange {
+                start: c.range.start,
+                end: c.range.end,
+            },
+            findings: c
+                .findings
+                .iter()
+                .map(|f| JsonFinding {
+                    level: f.level,
+                    category: f.category,
+                    rationale: &f.rationale,
+                    source: &f.source,
+                    focus_lines: &f.focus_lines,
+                })
+                .collect(),
             locations: c
                 .locations
                 .iter()
                 .map(|loc| JsonLocation {
                     hunk_id: &loc.hunk_id.0,
-                    file: loc.file_path.display().to_string(),
-                    line: loc.new_range.start,
-                    focus_lines: &loc.focus_lines,
+                    new_line: loc.new_range.start,
+                    old_line: loc.old_range.start,
                 })
                 .collect(),
         })
         .collect();
     let report = JsonReport {
+        schema_version: 2,
         base_sha: &diff.base_sha,
         head_sha: &diff.head_sha,
         items: json_items,
@@ -462,7 +557,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::classify::{Classification, Classified, Source};
+    use crate::classify::{Finding, HunkFindings, Source};
     use crate::consolidate::consolidate_exact;
     use crate::diff::{Diff, HunkId, LineRange};
 
@@ -474,28 +569,44 @@ mod tests {
         }
     }
 
-    fn classified(level: Level, category: Category, file: &str, line: u32) -> Classified {
-        Classified {
+    fn finding(
+        level: Level,
+        category: Category,
+        rationale: &str,
+        focus: Option<(u32, u32, Side)>,
+    ) -> Finding {
+        Finding {
+            level,
+            category,
+            rationale: rationale.into(),
+            source: Source::Heuristic {
+                name: "test".into(),
+            },
+            focus_lines: focus.map(|(s, e, side)| FocusLines {
+                start: s,
+                end: e,
+                side,
+            }),
+        }
+    }
+
+    /// Build a single-finding item the way `consolidate_exact` would, so
+    /// renderer tests exercise the real pipeline shape.
+    fn single_finding_item(level: Level, category: Category, file: &str, line: u32) -> Item {
+        let hf = HunkFindings {
             hunk_id: HunkId(format!("{file}:{line}")),
             file_path: PathBuf::from(file),
+            old_range: LineRange {
+                start: line,
+                count: 1,
+            },
             new_range: LineRange {
                 start: line,
                 count: 1,
             },
-            classification: Classification {
-                level,
-                category,
-                rationale: "test rationale".into(),
-                source: Source::Heuristic {
-                    name: "test".into(),
-                },
-                focus_lines: None,
-            },
-        }
-    }
-
-    fn item(level: Level, category: Category, file: &str, line: u32) -> ConsolidatedItem {
-        ConsolidatedItem::from(classified(level, category, file, line))
+            findings: vec![finding(level, category, "test rationale", None)],
+        };
+        consolidate_exact(vec![hf]).into_iter().next().unwrap()
     }
 
     #[test]
@@ -509,10 +620,10 @@ mod tests {
     #[test]
     fn summary_counts_levels() {
         let cs = vec![
-            item(Level::Review, Category::PublicApiChange, "a", 1),
-            item(Level::Review, Category::ControlFlow, "b", 1),
-            item(Level::Skim, Category::LlmAssessed, "c", 1),
-            item(Level::Skip, Category::Lockfile, "Cargo.lock", 1),
+            single_finding_item(Level::Review, Category::PublicApiChange, "a", 1),
+            single_finding_item(Level::Review, Category::ControlFlow, "b", 1),
+            single_finding_item(Level::Skim, Category::LlmAssessed, "c", 1),
+            single_finding_item(Level::Skip, Category::Lockfile, "Cargo.lock", 1),
         ];
         let s = Summary::from_items(&cs);
         assert_eq!(s.total, 4);
@@ -523,7 +634,7 @@ mod tests {
 
     #[test]
     fn human_renders_review_section() {
-        let cs = vec![item(
+        let cs = vec![single_finding_item(
             Level::Review,
             Category::PublicApiChange,
             "src/x.rs",
@@ -539,9 +650,9 @@ mod tests {
     #[test]
     fn human_groups_skip_by_category() {
         let cs = vec![
-            item(Level::Skip, Category::Generated, "dist/a.js", 1),
-            item(Level::Skip, Category::Generated, "dist/b.js", 1),
-            item(Level::Skip, Category::Lockfile, "Cargo.lock", 1),
+            single_finding_item(Level::Skip, Category::Generated, "dist/a.js", 1),
+            single_finding_item(Level::Skip, Category::Generated, "dist/b.js", 1),
+            single_finding_item(Level::Skip, Category::Lockfile, "Cargo.lock", 1),
         ];
         let out = human(&diff(), &cs, false);
         assert!(out.contains("generated (2)"));
@@ -550,7 +661,12 @@ mod tests {
 
     #[test]
     fn markdown_starts_with_sticky_marker() {
-        let cs = vec![item(Level::Review, Category::ControlFlow, "x", 1)];
+        let cs = vec![single_finding_item(
+            Level::Review,
+            Category::ControlFlow,
+            "x",
+            1,
+        )];
         let out = markdown(&diff(), &cs, None);
         assert!(out.starts_with(STICKY_MARKER));
         assert!(out.contains("## Garbelour"));
@@ -558,7 +674,12 @@ mod tests {
 
     #[test]
     fn markdown_review_items_have_no_link_without_repo_ref() {
-        let cs = vec![item(Level::Review, Category::ControlFlow, "src/x.rs", 42)];
+        let cs = vec![single_finding_item(
+            Level::Review,
+            Category::ControlFlow,
+            "src/x.rs",
+            42,
+        )];
         let out = markdown(&diff(), &cs, None);
         assert!(out.contains("`src/x.rs:42`"));
         assert!(!out.contains("https://"));
@@ -572,52 +693,58 @@ mod tests {
             repo: "widget".into(),
             pr: 42,
         };
-        let cs = vec![item(Level::Review, Category::ControlFlow, "src/x.rs", 7)];
+        let cs = vec![single_finding_item(
+            Level::Review,
+            Category::ControlFlow,
+            "src/x.rs",
+            7,
+        )];
         let out = markdown(&diff(), &cs, Some(&r));
         assert!(out.contains("https://github.com/acme/widget/pull/42/files#diff-"));
         assert!(out.contains("R7"));
     }
 
     #[test]
-    fn markdown_multi_location_item_lists_each_location() {
-        let inputs = vec![
-            {
-                let mut c = classified(Level::Review, Category::PublicApiChange, "src/x.rs", 30);
-                c.classification.rationale = "public enum signature changed".into();
-                c.classification.focus_lines = Some(FocusLines {
-                    start: 28,
-                    end: 156,
-                    side: Side::New,
-                });
-                c
+    fn markdown_multi_finding_item_lists_each_finding_as_nested_bullet() {
+        let hf = HunkFindings {
+            hunk_id: HunkId("src/x.rs:30".into()),
+            file_path: PathBuf::from("src/x.rs"),
+            old_range: LineRange {
+                start: 30,
+                count: 10,
             },
-            {
-                let mut c = classified(Level::Review, Category::PublicApiChange, "src/x.rs", 90);
-                c.classification.rationale = "public enum signature changed".into();
-                c.classification.focus_lines = Some(FocusLines {
-                    start: 28,
-                    end: 156,
-                    side: Side::New,
-                });
-                c
+            new_range: LineRange {
+                start: 30,
+                count: 10,
             },
-        ];
-        let consolidated = consolidate_exact(inputs);
-        assert_eq!(consolidated.len(), 1);
-        let out = markdown(&diff(), &consolidated, None);
-        // One bullet, two locators, comma-separated; second locator path elided.
-        let bullet = out.lines().find(|l| l.starts_with("- ")).unwrap();
-        assert!(bullet.contains("src/x.rs:28–156"));
-        assert!(
-            bullet.contains("`:28–156`"),
-            "second locator should elide path"
-        );
-        assert!(bullet.contains("public enum signature changed"));
+            findings: vec![
+                finding(
+                    Level::Review,
+                    Category::PublicApiChange,
+                    "public enum signature changed",
+                    Some((30, 40, Side::New)),
+                ),
+                finding(
+                    Level::Skim,
+                    Category::ControlFlow,
+                    "branch added",
+                    Some((35, 45, Side::New)),
+                ),
+            ],
+        };
+        let items = consolidate_exact(vec![hf]);
+        assert_eq!(items.len(), 1);
+        let out = markdown(&diff(), &items, None);
+        assert!(out.contains("`src/x.rs:30–45`"));
+        assert!(out.contains("**REVIEW**"));
+        assert!(out.contains("**SKIM**"));
+        assert!(out.contains("public enum signature changed"));
+        assert!(out.contains("branch added"));
     }
 
     #[test]
-    fn json_renders_locations_array() {
-        let cs = vec![item(
+    fn json_renders_findings_and_locations_arrays() {
+        let cs = vec![single_finding_item(
             Level::Review,
             Category::PublicApiChange,
             "src/x.rs",
@@ -625,11 +752,16 @@ mod tests {
         )];
         let out = json(&diff(), &cs).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["schema_version"], 2);
         assert_eq!(v["base_sha"].as_str().unwrap().len(), 40);
         assert_eq!(v["summary"]["total"], 1);
-        assert_eq!(v["items"][0]["locations"][0]["file"], "src/x.rs");
-        assert_eq!(v["items"][0]["locations"][0]["line"], 142);
+        assert_eq!(v["items"][0]["file"], "src/x.rs");
         assert_eq!(v["items"][0]["level"], "review");
-        assert_eq!(v["items"][0]["category"], "public_api_change");
+        assert_eq!(
+            v["items"][0]["findings"][0]["category"],
+            "public_api_change"
+        );
+        assert_eq!(v["items"][0]["locations"][0]["hunk_id"], "src/x.rs:142");
+        assert_eq!(v["items"][0]["range"]["start"], 142);
     }
 }

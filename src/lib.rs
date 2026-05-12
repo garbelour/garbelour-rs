@@ -20,8 +20,8 @@ pub mod render;
 pub mod run;
 
 pub use classify::{
-    Category, Classification, Classified, Classifier, FocusLines, Level, Pipeline, PipelineConfig,
-    Side, Source, Unclassified,
+    Category, Classifier, Finding, FocusLines, HunkFindings, Level, Pipeline, PipelineConfig, Side,
+    Source, Unclassified,
 };
 pub use diff::{Diff, FileDiff, FileStatus, Hunk, HunkId, LineRange};
 pub use lang::Language;

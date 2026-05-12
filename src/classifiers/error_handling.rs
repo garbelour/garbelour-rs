@@ -15,7 +15,7 @@
 use tree_sitter::{Node, Tree};
 
 use crate::ast::{parse, walk};
-use crate::classify::{Category, Classification, Classifier, FocusLines, Level, Side, Source};
+use crate::classify::{Category, Classifier, Finding, FocusLines, Level, Side, Source};
 use crate::diff::{FileDiff, Hunk};
 use crate::lang::Language;
 
@@ -42,42 +42,51 @@ impl Classifier for ErrorHandlingDeleted {
         140
     }
 
-    fn classify(&self, file: &mut FileDiff, hunk: &Hunk) -> Option<Classification> {
-        let language = file.language?;
+    fn classify(&self, file: &mut FileDiff, hunk: &Hunk) -> Vec<Finding> {
+        let Some(language) = file.language else {
+            return Vec::new();
+        };
         if hunk.removed_lines.is_empty() {
-            return None;
+            return Vec::new();
         }
         let _ = file.ensure_content();
-        let old_content = file.old_content.as_deref()?;
-        let old_tree = parse(language, old_content)?;
+        let Some(old_content) = file.old_content.as_deref() else {
+            return Vec::new();
+        };
+        let Some(old_tree) = parse(language, old_content) else {
+            return Vec::new();
+        };
 
-        let (label, range) = find_removed_error_handler(language, &old_tree, &hunk.removed_lines)?;
-        Some(Classification {
-            level: Level::Review,
-            category: Category::ErrorHandlingDeleted,
-            rationale: format!("removed {} at old lines {}–{}", label, range.0, range.1),
-            source: Source::Heuristic {
-                name: "error_handling".into(),
-            },
-            focus_lines: Some(FocusLines {
-                start: range.0,
-                end: range.1,
-                side: Side::Old,
-            }),
-        })
+        let mut findings: Vec<Finding> = Vec::new();
+        for (label, range) in
+            collect_removed_error_handlers(language, &old_tree, &hunk.removed_lines)
+        {
+            findings.push(Finding {
+                level: Level::Review,
+                category: Category::ErrorHandlingDeleted,
+                rationale: format!("removed {} at old lines {}–{}", label, range.0, range.1),
+                source: Source::Heuristic {
+                    name: "error_handling".into(),
+                },
+                focus_lines: Some(FocusLines {
+                    start: range.0,
+                    end: range.1,
+                    side: Side::Old,
+                }),
+            });
+        }
+        findings
     }
 }
 
-fn find_removed_error_handler(
+fn collect_removed_error_handlers(
     language: Language,
     old_tree: &Tree,
     removed_lines: &[u32],
-) -> Option<(&'static str, (u32, u32))> {
-    let mut found: Option<(&'static str, (u32, u32))> = None;
+) -> Vec<(&'static str, (u32, u32))> {
+    let mut out: Vec<(&'static str, (u32, u32))> = Vec::new();
+    let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
     walk(old_tree.root_node(), &mut |node| {
-        if found.is_some() {
-            return;
-        }
         let label = match error_handler_label(language, node.kind()) {
             Some(l) => l,
             None => return,
@@ -95,11 +104,14 @@ fn find_removed_error_handler(
                 .iter()
                 .any(|&l| l >= start_row && l <= end_row)
         };
-        if touched && construct_is_actually_present_on_removed_line(node, removed_lines) {
-            found = Some((label, (start_row, end_row)));
+        if touched
+            && construct_is_actually_present_on_removed_line(node, removed_lines)
+            && seen.insert((start_row, end_row))
+        {
+            out.push((label, (start_row, end_row)));
         }
     });
-    found
+    out
 }
 
 /// Guard against false positives where the *containing* construct still
@@ -189,10 +201,11 @@ mod tests {
         let old = "fn f() -> Result<u32, ()> {\n    let x = parse()?;\n    Ok(x)\n}\n";
         let new = "fn f() -> u32 {\n    let x = parse();\n    x\n}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![1, 2, 3], vec![1, 2, 3]);
-        let result = ErrorHandlingDeleted::new().classify(&mut f, &h).unwrap();
-        assert_eq!(result.category, Category::ErrorHandlingDeleted);
-        assert_eq!(result.level, Level::Review);
-        let focus = result.focus_lines.unwrap();
+        let result = ErrorHandlingDeleted::new().classify(&mut f, &h);
+        assert!(!result.is_empty());
+        assert_eq!(result[0].category, Category::ErrorHandlingDeleted);
+        assert_eq!(result[0].level, Level::Review);
+        let focus = result[0].focus_lines.as_ref().unwrap();
         assert_eq!(focus.side, Side::Old);
     }
 
@@ -202,7 +215,7 @@ mod tests {
         let new = "fn f() -> Result<u32, ()> { Ok(parse()?) }\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![1], vec![1]);
         // The `?` is added; we should not fire on additions.
-        assert!(ErrorHandlingDeleted::new().classify(&mut f, &h).is_none());
+        assert!(ErrorHandlingDeleted::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -210,8 +223,9 @@ mod tests {
         let old = "def f():\n    try:\n        do()\n    except Exception:\n        pass\n";
         let new = "def f():\n    do()\n";
         let (mut f, h) = fixture(Language::Python, old, new, vec![2], vec![2, 3, 4, 5]);
-        let result = ErrorHandlingDeleted::new().classify(&mut f, &h).unwrap();
-        assert_eq!(result.category, Category::ErrorHandlingDeleted);
+        let result = ErrorHandlingDeleted::new().classify(&mut f, &h);
+        assert!(!result.is_empty());
+        assert_eq!(result[0].category, Category::ErrorHandlingDeleted);
     }
 
     #[test]
@@ -220,7 +234,7 @@ mod tests {
         let new = "def f():\n    try:\n        do()\n    except KeyError:\n        pass\n";
         let (mut f, h) = fixture(Language::Python, old, new, vec![], vec![6, 7]);
         // The `except ValueError` clause head is on the removed line.
-        assert!(ErrorHandlingDeleted::new().classify(&mut f, &h).is_some());
+        assert!(!ErrorHandlingDeleted::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -228,7 +242,7 @@ mod tests {
         let old = "function f() {\n    try {\n        doIt();\n    } catch (e) {\n        log(e);\n    }\n}\n";
         let new = "function f() {\n    doIt();\n}\n";
         let (mut f, h) = fixture(Language::TypeScript, old, new, vec![2], vec![2, 3, 4, 5, 6]);
-        assert!(ErrorHandlingDeleted::new().classify(&mut f, &h).is_some());
+        assert!(!ErrorHandlingDeleted::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -236,7 +250,7 @@ mod tests {
         let old = "function f() {\n    try {\n        doIt();\n    } catch (e) {\n        log(e);\n    }\n}\n";
         let new = "function f() {\n    try {\n        doIt();\n    } finally {\n        cleanup();\n    }\n}\n";
         let (mut f, h) = fixture(Language::JavaScript, old, new, vec![4, 5], vec![4, 5]);
-        assert!(ErrorHandlingDeleted::new().classify(&mut f, &h).is_some());
+        assert!(!ErrorHandlingDeleted::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -244,7 +258,7 @@ mod tests {
         let old = "fn f() { foo(); }\n";
         let new = "fn f() { foo(); bar(); }\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![1], vec![]);
-        assert!(ErrorHandlingDeleted::new().classify(&mut f, &h).is_none());
+        assert!(ErrorHandlingDeleted::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -254,6 +268,6 @@ mod tests {
         let (mut f, h) = fixture(Language::Python, old, new, vec![], vec![4]);
         // Removing a line inside the try body shouldn't trigger removal of
         // the construct itself.
-        assert!(ErrorHandlingDeleted::new().classify(&mut f, &h).is_none());
+        assert!(ErrorHandlingDeleted::new().classify(&mut f, &h).is_empty());
     }
 }

@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use crate::classify::{Category, Classification, Classifier, Level, Source};
+use crate::classify::{Category, Classifier, Finding, Level, Source};
 use crate::diff::{FileDiff, Hunk};
 
 /// Filenames recognized as lockfiles by default. Extended via
@@ -40,10 +40,12 @@ impl Classifier for Lockfile {
         1
     }
 
-    fn classify(&self, file: &mut FileDiff, _hunk: &Hunk) -> Option<Classification> {
-        let basename = file.path.file_name()?.to_str()?;
+    fn classify(&self, file: &mut FileDiff, _hunk: &Hunk) -> Vec<Finding> {
+        let Some(basename) = file.path.file_name().and_then(|s| s.to_str()) else {
+            return Vec::new();
+        };
         if self.names.contains(basename) {
-            Some(Classification {
+            vec![Finding {
                 level: Level::Skip,
                 category: Category::Lockfile,
                 rationale: format!("lockfile update ({})", basename),
@@ -51,9 +53,9 @@ impl Classifier for Lockfile {
                     name: "lockfile".into(),
                 },
                 focus_lines: None,
-            })
+            }]
         } else {
-            None
+            Vec::new()
         }
     }
 }
@@ -93,9 +95,10 @@ mod tests {
         let cls = Lockfile::new(vec![]);
         for name in DEFAULT_NAMES {
             let mut f = file(name);
-            let result = cls.classify(&mut f, &hunk()).expect(name);
-            assert_eq!(result.level, Level::Skip);
-            assert_eq!(result.category, Category::Lockfile);
+            let result = cls.classify(&mut f, &hunk());
+            assert_eq!(result.len(), 1, "{name}");
+            assert_eq!(result[0].level, Level::Skip);
+            assert_eq!(result[0].category, Category::Lockfile);
         }
     }
 
@@ -103,28 +106,29 @@ mod tests {
     fn matches_lockfile_in_subdirectory() {
         let cls = Lockfile::new(vec![]);
         let mut f = file("packages/web/yarn.lock");
-        assert!(cls.classify(&mut f, &hunk()).is_some());
+        assert!(!cls.classify(&mut f, &hunk()).is_empty());
     }
 
     #[test]
     fn does_not_match_arbitrary_files() {
         let cls = Lockfile::new(vec![]);
         let mut f = file("src/main.rs");
-        assert!(cls.classify(&mut f, &hunk()).is_none());
+        assert!(cls.classify(&mut f, &hunk()).is_empty());
     }
 
     #[test]
     fn matches_extra_names_from_config() {
         let cls = Lockfile::new(vec!["shrinkwrap.json".into()]);
         let mut f = file("shrinkwrap.json");
-        assert!(cls.classify(&mut f, &hunk()).is_some());
+        assert!(!cls.classify(&mut f, &hunk()).is_empty());
     }
 
     #[test]
     fn rationale_includes_basename() {
         let cls = Lockfile::new(vec![]);
         let mut f = file("a/b/Cargo.lock");
-        let result = cls.classify(&mut f, &hunk()).unwrap();
-        assert!(result.rationale.contains("Cargo.lock"));
+        let result = cls.classify(&mut f, &hunk());
+        assert_eq!(result.len(), 1);
+        assert!(result[0].rationale.contains("Cargo.lock"));
     }
 }
