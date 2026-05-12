@@ -32,6 +32,7 @@ pub enum Category {
     PublicApiChange,
     ControlFlow,
     ErrorHandlingDeleted,
+    NumericalCalc,
     LargeChange,
 
     // LLM-assessed (any level).
@@ -136,7 +137,7 @@ impl Pipeline {
     pub fn standard(config: &PipelineConfig) -> anyhow::Result<Self> {
         use crate::classifiers::{
             CommentOnly, ControlFlow, ErrorHandlingDeleted, Generated, ImportReorder, Lockfile,
-            PublicApi,
+            NumericalCalc, PublicApi,
         };
         let classifiers: Vec<Box<dyn Classifier>> = vec![
             Box::new(Generated::new(
@@ -148,6 +149,7 @@ impl Pipeline {
             Box::new(ImportReorder::new()),
             Box::new(PublicApi::new()),
             Box::new(ControlFlow::new()),
+            Box::new(NumericalCalc::new()),
             Box::new(ErrorHandlingDeleted::new()),
         ];
         Ok(Self::new(classifiers))

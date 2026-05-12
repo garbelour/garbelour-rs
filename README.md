@@ -30,6 +30,7 @@ a TTY, json otherwise.
 | `import_reorder`       | Skip    | Same set of imports, different order                                     |
 | `public_api`           | Review  | `pub` items in Rust, `export` in TS/JS, module-level `def`/`class` in Python |
 | `control_flow`         | Review  | Added / removed / modified `if`, `match`/`switch`, `for`, `while`, `loop`, `return` |
+| `numerical_calc`       | Review  | Non-trivial arithmetic (≥ 2 operators) or calls into `Math.*` / `np.*` / `f64::*` / … |
 | `error_handling`       | Review  | Removed `?`, `try`/`except`, `try`/`catch`, `except` clauses             |
 
 AST-based classifiers use tree-sitter for Rust, Python, TypeScript, and

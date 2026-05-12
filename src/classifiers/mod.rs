@@ -6,6 +6,7 @@ pub mod error_handling;
 pub mod generated;
 pub mod import_reorder;
 pub mod lockfile;
+pub mod numerical_calc;
 pub mod public_api;
 
 pub use comment_only::CommentOnly;
@@ -14,4 +15,5 @@ pub use error_handling::ErrorHandlingDeleted;
 pub use generated::Generated;
 pub use import_reorder::ImportReorder;
 pub use lockfile::Lockfile;
+pub use numerical_calc::NumericalCalc;
 pub use public_api::PublicApi;

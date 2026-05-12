@@ -198,6 +198,7 @@ fn category_label(c: Category) -> &'static str {
         Category::PublicApiChange => "public-api",
         Category::ControlFlow => "control-flow",
         Category::ErrorHandlingDeleted => "error-handling-deleted",
+        Category::NumericalCalc => "numerical-calc",
         Category::LargeChange => "large-change",
         Category::LlmAssessed => "llm",
     }

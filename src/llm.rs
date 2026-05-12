@@ -119,14 +119,25 @@ pub fn detect_provider(
     })
 }
 
-const SYSTEM_PROMPT: &str = "You are not reviewing code. Your only job is to decide \
-how much attention a human reviewer should spend on each diff hunk. For each hunk, \
-choose one of three levels: review (reviewer must read carefully — real logic, \
-behavior, or contract change), skim (reviewer should glance — substantive but \
-low-risk), or skip (reviewer can collapse — boilerplate, no semantic effect). Do not \
-suggest changes. Do not flag bugs. Do not write code review comments. For hunks \
-classified as review or skim, identify the specific line range within the hunk that \
-is most important. Output a single line of justification per hunk, no more.";
+const SYSTEM_PROMPT: &str = "Your job is to identify the code that matters: \
+    code that encodes a project-specific decision (business logic, an invariant, \
+    a load-bearing contract, or non-obvious behavior). You are not reviewing \
+    code. You are deciding which diff hunks require human attention, and which \
+    are scaffolding that any competent developer would recognize as generic \
+    (re-exports, trivial wiring, standard derives, formatting, simple test \
+    setup). For each hunk, choose one of three levels: review (reviewer must \
+    read carefully: substantive logic, behavior, or contract change), skim \
+    (reviewer should glance: substantive but low-risk), or skip (reviewer can \
+    collapse: boilerplate, no semantic effect). Do not suggest changes. Do not \
+    flag bugs. Do not write code-review comments. For review and skim hunks, \
+    identify the specific line range within the hunk that is most important. \
+    \
+    The rationale must describe what changed and why it warrants this level — \
+    not what the reviewer should do. No imperatives ('verify…', 'consider…', \
+    'ensure…', 'check…'). One sentence, ≤ 30 words. \
+    \
+    Good: 'Adds a new public enum variant; widens the API surface.' \
+    Bad: 'Verify the new variant doesn't break downstream consumers.'";
 
 /// Top-level entry: classify all unclassified hunks, returning one
 /// `Classified` per hunk the model was able to assess. Hunks the model
