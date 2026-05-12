@@ -31,11 +31,14 @@ a TTY, json otherwise.
 | `public_api`           | Review  | `pub` items in Rust, `export` in TS/JS, module-level `def`/`class` in Python |
 | `control_flow`         | Review  | Added / removed / modified `if`, `match`/`switch`, `for`, `while`, `loop`, `return` |
 | `error_handling`       | Review  | Removed `?`, `try`/`except`, `try`/`catch`, `except` clauses             |
-| `size_threshold`       | Review  | Hunks > 150 changed lines (configurable)                                 |
 
 AST-based classifiers use tree-sitter for Rust, Python, TypeScript, and
 JavaScript. Files in unsupported languages still go through the path-based
-classifiers (generated, lockfile, size).
+classifiers (generated, lockfile).
+
+Large hunks aren't auto-elevated. Size alone is a weak signal; instead, big
+hunks that no other heuristic claims flow through `--llm` for a content-aware
+verdict, or fall back to **review** when the LLM is off.
 
 ## Install
 
@@ -141,7 +144,6 @@ fields are optional.
 [classify]
 generated_globs = ["generated/**", "*.auto.ts"]   # merged with defaults
 lockfile_names = ["shrinkwrap.json"]              # merged with defaults
-size_threshold = 150
 
 [llm]
 provider = "anthropic"

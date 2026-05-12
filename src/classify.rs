@@ -113,7 +113,6 @@ pub trait Classifier: Send + Sync {
 /// without pulling in TOML parsing.
 #[derive(Clone, Debug, Default)]
 pub struct PipelineConfig {
-    pub size_threshold: u32,
     pub generated_globs: Vec<String>,
     pub generated_paths: HashSet<PathBuf>,
     pub lockfile_names: Vec<String>,
@@ -132,12 +131,12 @@ impl Pipeline {
     }
 
     /// The standard pipeline, built from the project's `PipelineConfig`.
-    /// Includes path-based, AST-based, and size-threshold classifiers.
-    /// Order is determined by each classifier's `priority()`.
+    /// Includes path-based and AST-based classifiers. Hunks no heuristic
+    /// claims go to the LLM (when `--llm` is on) or default to Review.
     pub fn standard(config: &PipelineConfig) -> anyhow::Result<Self> {
         use crate::classifiers::{
             CommentOnly, ControlFlow, ErrorHandlingDeleted, Generated, ImportReorder, Lockfile,
-            PublicApi, SizeThreshold,
+            PublicApi,
         };
         let classifiers: Vec<Box<dyn Classifier>> = vec![
             Box::new(Generated::new(
@@ -150,7 +149,6 @@ impl Pipeline {
             Box::new(PublicApi::new()),
             Box::new(ControlFlow::new()),
             Box::new(ErrorHandlingDeleted::new()),
-            Box::new(SizeThreshold::new(config.size_threshold)),
         ];
         Ok(Self::new(classifiers))
     }
@@ -335,10 +333,7 @@ mod tests {
 
     #[test]
     fn standard_pipeline_classifies_lockfile() {
-        let config = PipelineConfig {
-            size_threshold: 150,
-            ..Default::default()
-        };
+        let config = PipelineConfig::default();
         let pipeline = Pipeline::standard(&config).unwrap();
         let mut diff = Diff {
             base_sha: "0".repeat(40),

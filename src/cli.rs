@@ -79,10 +79,6 @@ pub struct ReviewArgs {
     /// Path to garbelour.toml.
     #[arg(long, default_value = "garbelour.toml")]
     pub config: PathBuf,
-
-    /// Lines-changed threshold above which a hunk auto-classifies as Review.
-    #[arg(long, default_value_t = 150)]
-    pub size_threshold: u32,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]

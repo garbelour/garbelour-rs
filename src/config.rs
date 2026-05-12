@@ -26,7 +26,6 @@ pub struct Classify {
     pub generated_globs: Vec<String>,
     #[serde(default)]
     pub lockfile_names: Vec<String>,
-    pub size_threshold: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -72,7 +71,6 @@ mod tests {
             [classify]
             generated_globs = ["generated/**", "*.auto.ts"]
             lockfile_names = ["shrinkwrap.json"]
-            size_threshold = 200
 
             [llm]
             provider = "anthropic"
@@ -83,7 +81,6 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(text).unwrap();
         assert_eq!(cfg.classify.generated_globs.len(), 2);
-        assert_eq!(cfg.classify.size_threshold, Some(200));
         assert_eq!(cfg.llm.provider.as_deref(), Some("anthropic"));
         assert_eq!(
             cfg.github.base_url.as_deref(),
@@ -95,11 +92,10 @@ mod tests {
     fn parses_partial_toml() {
         let text = r#"
             [classify]
-            size_threshold = 50
+            generated_globs = ["foo/**"]
         "#;
         let cfg: Config = toml::from_str(text).unwrap();
-        assert_eq!(cfg.classify.size_threshold, Some(50));
-        assert!(cfg.classify.generated_globs.is_empty());
+        assert_eq!(cfg.classify.generated_globs.len(), 1);
         assert!(cfg.llm.provider.is_none());
     }
 

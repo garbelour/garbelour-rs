@@ -17,10 +17,6 @@ fn build_pipeline_config(args: &ReviewArgs, config: &Config) -> PipelineConfig {
     lockfile_names.dedup();
     let generated_paths = classifiers::generated::read_gitattributes_generated(&args.repo);
     PipelineConfig {
-        size_threshold: config
-            .classify
-            .size_threshold
-            .unwrap_or(args.size_threshold),
         generated_globs,
         generated_paths,
         lockfile_names,
