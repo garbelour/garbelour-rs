@@ -233,6 +233,16 @@ let (classified, unclassified) = pipeline.run(&mut d);
 
 ## What is New in Garbelour
 
+### 0.3.0
+
+Improved classifier prompt.
+
+Added new classifier for numerical calculations.
+
+### 0.2.0
+
+Extensions to the public interface.
+
 ### 0.1.0
 
 Initial release.
