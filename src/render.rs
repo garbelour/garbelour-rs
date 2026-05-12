@@ -298,7 +298,7 @@ fn markdown_item(c: &Classified, repo_ref: Option<&RepoRef>) -> String {
         ),
         None => label,
     };
-    format!("- {} — {}\n", link_text, c.classification.rationale)
+    format!("- {}: {}\n", link_text, c.classification.rationale)
 }
 
 #[derive(Clone, Debug)]

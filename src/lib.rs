@@ -1,4 +1,4 @@
-//! Garbelour — classify PR diff hunks by reviewer attention.
+//! Garbelour: classify PR diff hunks by reviewer attention.
 //!
 //! Every hunk in a pull request gets one of three levels: `review` (read
 //! carefully), `skim` (glance), or `skip` (collapse). Heuristics handle the

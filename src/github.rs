@@ -126,7 +126,7 @@ pub struct IssueComment {
 
 /// Upsert: find a comment whose body contains the sticky marker; if found,
 /// PATCH it; otherwise POST a new one. The body must already start with the
-/// marker — the renderer enforces this.
+/// marker: the renderer enforces this.
 pub fn upsert_sticky_comment(
     client: &GitHubClient,
     owner: &str,
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn upsert_requires_sticky_marker() {
-        // We don't construct a real client here — just exercise the body check.
+        // We don't construct a real client here: just exercise the body check.
         let client = GitHubClient {
             token: "x".into(),
             base_url: "http://localhost:0".into(),

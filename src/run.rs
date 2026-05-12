@@ -125,7 +125,7 @@ fn review(args: ReviewArgs) -> anyhow::Result<u8> {
                 classification: Classification {
                     level: Level::Review,
                     category: Category::LlmAssessed,
-                    rationale: "no heuristic match and LLM not run — defaulting to review".into(),
+                    rationale: "no heuristic match and LLM not run: defaulting to review".into(),
                     source: Source::Heuristic {
                         name: "default".into(),
                     },

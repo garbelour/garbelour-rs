@@ -39,13 +39,17 @@ classifiers (generated, lockfile, size).
 
 ## Install
 
-From source:
+To install the CLI via Python pip:
 
 ```sh
-cargo install --path .
+pip install garbelour
 ```
 
-The binary is `garbelour`.
+To instsall the CLI via Rust cargo:
+
+```sh
+cargo install garbelour
+```
 
 
 ## Usage
@@ -95,7 +99,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - run: cargo install garbelour
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: pip install garbelour
       - run: garbelour review --post-comment --llm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

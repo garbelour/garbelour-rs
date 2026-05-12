@@ -288,7 +288,7 @@ fn parse_status_code(code: &str) -> anyhow::Result<(FileStatus, usize)> {
         'A' => Ok((FileStatus::Added, 1)),
         'M' => Ok((FileStatus::Modified, 1)),
         'D' => Ok((FileStatus::Deleted, 1)),
-        // Type-changes (regular file ↔ symlink, etc.) — treat as modification.
+        // Type-changes (regular file ↔ symlink, etc.): treat as modification.
         'T' => Ok((FileStatus::Modified, 1)),
         // Treat copy as rename for v1; both signal a moved-or-derived file
         // and the classifiers don't distinguish them.
@@ -417,7 +417,7 @@ fn parse_file_section(section: &str) -> Option<ParsedFile> {
     while let Some(header) = next_header.take() {
         let Some((old_start, _old_count, new_start, _new_count)) = parse_hunk_header(&header)
         else {
-            // Unrecognizable header — skip the rest of this section.
+            // Unrecognizable header: skip the rest of this section.
             break;
         };
         let mut old_lines = Vec::new();
@@ -442,7 +442,7 @@ fn parse_file_section(section: &str) -> Option<ParsedFile> {
             }
             lines.next();
             if line.starts_with('\\') {
-                // `\ No newline at end of file` — informational, ignore.
+                // `\ No newline at end of file`: informational, ignore.
                 continue;
             } else if let Some(rest) = line.strip_prefix('+') {
                 new_lines.push(rest.to_string());
