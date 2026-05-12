@@ -166,7 +166,7 @@ fn build_consolidation_prompt(items: &[ConsolidatedItem], eligible: &[usize]) ->
             Some(f) => format!("{}:{}–{}", p.file_path.display(), f.start, f.end),
             None => format!("{}:{}", p.file_path.display(), p.new_range.start),
         };
-        out.push_str(&format!("[{idx}] {loc} — {}\n", c.rationale));
+        out.push_str(&format!("[{idx}] {loc}: {}\n", c.rationale));
     }
     out.push_str(concat!(
         "\nRespond ONLY with valid JSON:\n",
