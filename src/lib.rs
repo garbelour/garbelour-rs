@@ -10,6 +10,7 @@ pub mod classifiers;
 pub mod classify;
 pub mod cli;
 pub mod config;
+pub mod consolidate;
 pub mod diff;
 pub mod error;
 pub mod github;

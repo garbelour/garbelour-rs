@@ -5,6 +5,7 @@ use crate::classify::{
 };
 use crate::cli::{Cli, ColorChoice, Command, Format, FormatChoice, ReviewArgs};
 use crate::config::Config;
+use crate::consolidate;
 use crate::{classifiers, diff, github, llm, render};
 
 fn build_pipeline_config(args: &ReviewArgs, config: &Config) -> PipelineConfig {
@@ -104,16 +105,23 @@ fn review(args: ReviewArgs) -> anyhow::Result<u8> {
     let pipeline = Pipeline::standard(&pipeline_config)?;
     let (mut classified, unclassified) = pipeline.run(&mut diff);
 
-    if args.llm && !unclassified.is_empty() {
-        let llm_config = llm::detect_provider(
+    let llm_config = if args.llm {
+        Some(llm::detect_provider(
             args.llm_provider
                 .as_deref()
                 .or(config.llm.provider.as_deref()),
             args.llm_model.as_deref().or(config.llm.model.as_deref()),
             args.llm_base_url.as_deref(),
-        )?;
-        let llm_results = llm::classify_hunks(&unclassified, &llm_config)?;
-        classified.extend(llm_results);
+        )?)
+    } else {
+        None
+    };
+
+    if let Some(cfg) = &llm_config {
+        if !unclassified.is_empty() {
+            let llm_results = llm::classify_hunks(&unclassified, cfg)?;
+            classified.extend(llm_results);
+        }
     }
 
     for u in &unclassified {
@@ -135,17 +143,24 @@ fn review(args: ReviewArgs) -> anyhow::Result<u8> {
         }
     }
 
+    // Stage A: always-on mechanical dedup.
+    let mut items = consolidate::consolidate_exact(classified);
+    // Stage B: LLM-driven grouping of same-finding repeats.
+    if let Some(cfg) = &llm_config {
+        items = consolidate::consolidate_llm(items, cfg)?;
+    }
+
     let format = resolve_format(&args);
     let use_color = resolve_color(&args);
 
     match format {
         Format::Human => {
-            eprintln!("{}", render::summary_line(&classified));
-            print!("{}", render::human(&diff, &classified, use_color));
+            eprintln!("{}", render::summary_line(&items));
+            print!("{}", render::human(&diff, &items, use_color));
         }
         Format::Markdown => {
             let repo_ref = build_repo_ref(&args, event.as_ref());
-            let body = render::markdown(&diff, &classified, repo_ref.as_ref());
+            let body = render::markdown(&diff, &items, repo_ref.as_ref());
             if args.post_comment {
                 let client = github::GitHubClient::from_env()?;
                 let pr = repo_ref.as_ref().ok_or_else(|| {
@@ -158,7 +173,7 @@ fn review(args: ReviewArgs) -> anyhow::Result<u8> {
             }
         }
         Format::Json => {
-            let json = render::json(&diff, &classified)?;
+            let json = render::json(&diff, &items)?;
             println!("{json}");
         }
     }

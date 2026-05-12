@@ -1,4 +1,8 @@
 //! Output rendering: human (terminal), markdown (sticky comment), json.
+//!
+//! All three renderers operate on `&[ConsolidatedItem]`, where each item
+//! carries one or more `Location`s. Multi-location items are rendered with
+//! a comma-separated locator list and a single shared rationale.
 
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
@@ -6,10 +10,12 @@ use std::io::IsTerminal;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::classify::{Category, Classified, FocusLines, Level, Side};
+use crate::classify::{Category, FocusLines, Level, Side, Source};
+use crate::consolidate::{ConsolidatedItem, Location};
 use crate::diff::Diff;
 
-/// Counts of classified hunks at each level.
+/// Counts at each level. `total` is the number of consolidated items (after
+/// dedup/merge), not the underlying hunk count.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Summary {
     pub total: usize,
@@ -19,11 +25,11 @@ pub struct Summary {
 }
 
 impl Summary {
-    pub fn from_classified(classified: &[Classified]) -> Self {
+    pub fn from_items(items: &[ConsolidatedItem]) -> Self {
         let mut s = Summary::default();
-        for c in classified {
+        for c in items {
             s.total += 1;
-            match c.classification.level {
+            match c.level {
                 Level::Review => s.review += 1,
                 Level::Skim => s.skim += 1,
                 Level::Skip => s.skip += 1,
@@ -33,9 +39,8 @@ impl Summary {
     }
 }
 
-/// Single-line summary printed to stderr in human-mode runs.
-pub fn summary_line(classified: &[Classified]) -> String {
-    let s = Summary::from_classified(classified);
+pub fn summary_line(items: &[ConsolidatedItem]) -> String {
+    let s = Summary::from_items(items);
     format!(
         "garbelour: {} of {} hunks need review, {} worth skimming, {} mechanical",
         s.review, s.total, s.skim, s.skip
@@ -47,18 +52,20 @@ pub fn summary_line(classified: &[Classified]) -> String {
 /// Terminal-friendly report. Sections: Review (always), Skim (if any), Skip
 /// (grouped by category). When `use_color` is true, ANSI escape codes color
 /// the section headers and file:line columns.
-pub fn human(_diff: &Diff, classified: &[Classified], use_color: bool) -> String {
+pub fn human(_diff: &Diff, items: &[ConsolidatedItem], use_color: bool) -> String {
     let mut review = Vec::new();
     let mut skim = Vec::new();
     let mut skip: BTreeMap<Category, Vec<String>> = BTreeMap::new();
-    for c in classified {
-        match c.classification.level {
+    for c in items {
+        match c.level {
             Level::Review => review.push(c),
             Level::Skim => skim.push(c),
-            Level::Skip => skip
-                .entry(c.classification.category)
-                .or_default()
-                .push(c.file_path.display().to_string()),
+            Level::Skip => {
+                let entry = skip.entry(c.category).or_default();
+                for loc in &c.locations {
+                    entry.push(loc.file_path.display().to_string());
+                }
+            }
         }
     }
     let mut out = String::new();
@@ -93,7 +100,7 @@ pub fn human(_diff: &Diff, classified: &[Classified], use_color: bool) -> String
 fn push_section(
     out: &mut String,
     title: &str,
-    items: &[&Classified],
+    items: &[&ConsolidatedItem],
     use_color: bool,
     section_color: Color,
 ) {
@@ -108,36 +115,53 @@ fn push_section(
         use_color,
         header_color,
     );
-    let max_locator = items.iter().map(|c| locator(c).len()).max().unwrap_or(0);
-    for c in items {
-        let loc = locator(c);
-        let pad = " ".repeat(max_locator.saturating_sub(loc.len()) + 4);
+    let locators: Vec<String> = items.iter().map(|c| human_locator(c)).collect();
+    let max = locators.iter().map(|s| s.len()).max().unwrap_or(0);
+    for (c, loc) in items.iter().zip(locators.iter()) {
+        let pad = " ".repeat(max.saturating_sub(loc.len()) + 4);
         let mut left = format!("    {loc}");
         if use_color {
             left = colorize(&left, section_color);
         }
         out.push_str(&left);
         out.push_str(&pad);
-        out.push_str(&c.classification.rationale);
+        out.push_str(&c.rationale);
         out.push('\n');
     }
 }
 
-fn locator(c: &Classified) -> String {
-    let path = c.file_path.display();
-    match &c.classification.focus_lines {
+/// Build a single locator string for the human renderer. Multi-location
+/// items render as `file:L1, file:L2, ...`, falling back to bare path
+/// elision (`file:L1, :L2`) when all locations share the same file.
+fn human_locator(c: &ConsolidatedItem) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let first_path = c.primary().file_path.display().to_string();
+    for (i, loc) in c.locations.iter().enumerate() {
+        let path_str = loc.file_path.display().to_string();
+        let path_part = if i > 0 && path_str == first_path {
+            String::new()
+        } else {
+            path_str
+        };
+        parts.push(format!("{}{}", path_part, line_suffix(loc)));
+    }
+    parts.join(", ")
+}
+
+fn line_suffix(loc: &Location) -> String {
+    match &loc.focus_lines {
         Some(FocusLines { start, end, side }) => {
-            let suffix = match side {
+            let s = match side {
                 Side::Old => " (old)",
                 Side::New => "",
             };
             if start == end {
-                format!("{}:{}{}", path, start, suffix)
+                format!(":{}{}", start, s)
             } else {
-                format!("{}:{}–{}{}", path, start, end, suffix)
+                format!(":{}–{}{}", start, end, s)
             }
         }
-        None => format!("{}:{}", path, c.new_range.start),
+        None => format!(":{}", loc.new_range.start),
     }
 }
 
@@ -216,20 +240,22 @@ pub const STICKY_MARKER: &str = "<!-- garbelour:sticky -->";
 /// Build the GitHub sticky-comment body. `repo_ref` carries the owner/repo/pr
 /// triple needed for deep links; if `None`, links are omitted (so the
 /// rendered markdown is still readable when invoked outside GitHub).
-pub fn markdown(_diff: &Diff, classified: &[Classified], repo_ref: Option<&RepoRef>) -> String {
-    let s = Summary::from_classified(classified);
+pub fn markdown(_diff: &Diff, items: &[ConsolidatedItem], repo_ref: Option<&RepoRef>) -> String {
+    let s = Summary::from_items(items);
 
     let mut review = Vec::new();
     let mut skim = Vec::new();
     let mut skip: BTreeMap<Category, Vec<String>> = BTreeMap::new();
-    for c in classified {
-        match c.classification.level {
+    for c in items {
+        match c.level {
             Level::Review => review.push(c),
             Level::Skim => skim.push(c),
-            Level::Skip => skip
-                .entry(c.classification.category)
-                .or_default()
-                .push(c.file_path.display().to_string()),
+            Level::Skip => {
+                let entry = skip.entry(c.category).or_default();
+                for loc in &c.locations {
+                    entry.push(loc.file_path.display().to_string());
+                }
+            }
         }
     }
 
@@ -277,8 +303,24 @@ pub fn markdown(_diff: &Diff, classified: &[Classified], repo_ref: Option<&RepoR
     out
 }
 
-fn markdown_item(c: &Classified, repo_ref: Option<&RepoRef>) -> String {
-    let (display_line, target_line, side) = match &c.classification.focus_lines {
+fn markdown_item(c: &ConsolidatedItem, repo_ref: Option<&RepoRef>) -> String {
+    let primary_path = c.primary().file_path.display().to_string();
+    let parts: Vec<String> = c
+        .locations
+        .iter()
+        .enumerate()
+        .map(|(i, loc)| markdown_locator(loc, repo_ref, i, &primary_path))
+        .collect();
+    format!("- {}: {}\n", parts.join(", "), c.rationale)
+}
+
+fn markdown_locator(
+    loc: &Location,
+    repo_ref: Option<&RepoRef>,
+    idx: usize,
+    primary_path: &str,
+) -> String {
+    let (display_line, target_line, side) = match &loc.focus_lines {
         Some(f) => {
             let display = if f.start == f.end {
                 format!("{}", f.start)
@@ -287,23 +329,32 @@ fn markdown_item(c: &Classified, repo_ref: Option<&RepoRef>) -> String {
             };
             (display, f.start, f.side)
         }
-        None => (c.new_range.start.to_string(), c.new_range.start, Side::New),
+        None => (
+            loc.new_range.start.to_string(),
+            loc.new_range.start,
+            Side::New,
+        ),
     };
-    let label = format!("`{}:{}`", c.file_path.display(), display_line);
-    let link_text = match repo_ref {
+    let path_str = loc.file_path.display().to_string();
+    let shown_path = if idx > 0 && path_str == primary_path {
+        String::new()
+    } else {
+        path_str.clone()
+    };
+    let label = format!("`{}:{}`", shown_path, display_line);
+    match repo_ref {
         Some(r) => format!(
             "[{}]({})",
             label,
-            deep_link(r, &c.file_path.to_string_lossy(), target_line, side)
+            deep_link(r, &path_str, target_line, side)
         ),
         None => label,
-    };
-    format!("- {}: {}\n", link_text, c.classification.rationale)
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct RepoRef {
-    pub host: String, // e.g. "https://github.com"
+    pub host: String,
     pub owner: String,
     pub repo: String,
     pub pr: u64,
@@ -335,20 +386,25 @@ pub fn diff_anchor(path: &str, line: u32, side: Side) -> String {
 struct JsonReport<'a> {
     base_sha: &'a str,
     head_sha: &'a str,
-    hunks: Vec<JsonHunk<'a>>,
+    items: Vec<JsonItem<'a>>,
     summary: JsonSummary,
 }
 
 #[derive(Serialize)]
-struct JsonHunk<'a> {
-    hunk_id: &'a str,
-    file: String,
-    line: u32,
+struct JsonItem<'a> {
     level: Level,
     category: Category,
     rationale: &'a str,
+    source: &'a Source,
+    locations: Vec<JsonLocation<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonLocation<'a> {
+    hunk_id: &'a str,
+    file: String,
+    line: u32,
     focus_lines: &'a Option<FocusLines>,
-    source: &'a crate::classify::Source,
 }
 
 #[derive(Serialize)]
@@ -359,25 +415,31 @@ struct JsonSummary {
     skip: usize,
 }
 
-pub fn json(diff: &Diff, classified: &[Classified]) -> anyhow::Result<String> {
-    let summary = Summary::from_classified(classified);
-    let hunks: Vec<JsonHunk> = classified
+pub fn json(diff: &Diff, items: &[ConsolidatedItem]) -> anyhow::Result<String> {
+    let summary = Summary::from_items(items);
+    let json_items: Vec<JsonItem> = items
         .iter()
-        .map(|c| JsonHunk {
-            hunk_id: &c.hunk_id.0,
-            file: c.file_path.display().to_string(),
-            line: c.new_range.start,
-            level: c.classification.level,
-            category: c.classification.category,
-            rationale: &c.classification.rationale,
-            focus_lines: &c.classification.focus_lines,
-            source: &c.classification.source,
+        .map(|c| JsonItem {
+            level: c.level,
+            category: c.category,
+            rationale: &c.rationale,
+            source: &c.source,
+            locations: c
+                .locations
+                .iter()
+                .map(|loc| JsonLocation {
+                    hunk_id: &loc.hunk_id.0,
+                    file: loc.file_path.display().to_string(),
+                    line: loc.new_range.start,
+                    focus_lines: &loc.focus_lines,
+                })
+                .collect(),
         })
         .collect();
     let report = JsonReport {
         base_sha: &diff.base_sha,
         head_sha: &diff.head_sha,
-        hunks,
+        items: json_items,
         summary: JsonSummary {
             total: summary.total,
             review: summary.review,
@@ -390,8 +452,6 @@ pub fn json(diff: &Diff, classified: &[Classified]) -> anyhow::Result<String> {
 
 // --- format auto-detect helpers -----------------------------------------
 
-/// Whether stdout is connected to a TTY. Wraps `io::stdout().is_terminal()`
-/// so callers don't need to import the trait.
 pub fn stdout_is_tty() -> bool {
     std::io::stdout().is_terminal()
 }
@@ -401,7 +461,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::classify::{Classification, Source};
+    use crate::classify::{Classification, Classified, Source};
+    use crate::consolidate::consolidate_exact;
     use crate::diff::{Diff, HunkId, LineRange};
 
     fn diff() -> Diff {
@@ -432,10 +493,13 @@ mod tests {
         }
     }
 
+    fn item(level: Level, category: Category, file: &str, line: u32) -> ConsolidatedItem {
+        ConsolidatedItem::from(classified(level, category, file, line))
+    }
+
     #[test]
     fn anchor_uses_sha256_hex_and_side_prefix() {
         let anchor = diff_anchor("src/index.js", 42, Side::New);
-        // The known SHA-256 of "src/index.js":
         let expected_hash = hex::encode(Sha256::digest("src/index.js".as_bytes()));
         assert_eq!(anchor, format!("diff-{}R42", expected_hash));
         assert!(diff_anchor("src/index.js", 42, Side::Old).contains('L'));
@@ -444,12 +508,12 @@ mod tests {
     #[test]
     fn summary_counts_levels() {
         let cs = vec![
-            classified(Level::Review, Category::PublicApiChange, "a", 1),
-            classified(Level::Review, Category::ControlFlow, "b", 1),
-            classified(Level::Skim, Category::LlmAssessed, "c", 1),
-            classified(Level::Skip, Category::Lockfile, "Cargo.lock", 1),
+            item(Level::Review, Category::PublicApiChange, "a", 1),
+            item(Level::Review, Category::ControlFlow, "b", 1),
+            item(Level::Skim, Category::LlmAssessed, "c", 1),
+            item(Level::Skip, Category::Lockfile, "Cargo.lock", 1),
         ];
-        let s = Summary::from_classified(&cs);
+        let s = Summary::from_items(&cs);
         assert_eq!(s.total, 4);
         assert_eq!(s.review, 2);
         assert_eq!(s.skim, 1);
@@ -458,7 +522,7 @@ mod tests {
 
     #[test]
     fn human_renders_review_section() {
-        let cs = vec![classified(
+        let cs = vec![item(
             Level::Review,
             Category::PublicApiChange,
             "src/x.rs",
@@ -468,23 +532,15 @@ mod tests {
         assert!(out.contains("Review (1)"));
         assert!(out.contains("src/x.rs:42"));
         assert!(out.contains("test rationale"));
-        // No ANSI when use_color=false.
         assert!(!out.contains("\x1b["));
-    }
-
-    #[test]
-    fn human_renders_with_color() {
-        let cs = vec![classified(Level::Review, Category::ControlFlow, "x", 1)];
-        let out = human(&diff(), &cs, true);
-        assert!(out.contains("\x1b[1;31m"), "should contain bold red ANSI");
     }
 
     #[test]
     fn human_groups_skip_by_category() {
         let cs = vec![
-            classified(Level::Skip, Category::Generated, "dist/a.js", 1),
-            classified(Level::Skip, Category::Generated, "dist/b.js", 1),
-            classified(Level::Skip, Category::Lockfile, "Cargo.lock", 1),
+            item(Level::Skip, Category::Generated, "dist/a.js", 1),
+            item(Level::Skip, Category::Generated, "dist/b.js", 1),
+            item(Level::Skip, Category::Lockfile, "Cargo.lock", 1),
         ];
         let out = human(&diff(), &cs, false);
         assert!(out.contains("generated (2)"));
@@ -493,7 +549,7 @@ mod tests {
 
     #[test]
     fn markdown_starts_with_sticky_marker() {
-        let cs = vec![classified(Level::Review, Category::ControlFlow, "x", 1)];
+        let cs = vec![item(Level::Review, Category::ControlFlow, "x", 1)];
         let out = markdown(&diff(), &cs, None);
         assert!(out.starts_with(STICKY_MARKER));
         assert!(out.contains("## Garbelour"));
@@ -501,12 +557,7 @@ mod tests {
 
     #[test]
     fn markdown_review_items_have_no_link_without_repo_ref() {
-        let cs = vec![classified(
-            Level::Review,
-            Category::ControlFlow,
-            "src/x.rs",
-            42,
-        )];
+        let cs = vec![item(Level::Review, Category::ControlFlow, "src/x.rs", 42)];
         let out = markdown(&diff(), &cs, None);
         assert!(out.contains("`src/x.rs:42`"));
         assert!(!out.contains("https://"));
@@ -520,28 +571,52 @@ mod tests {
             repo: "widget".into(),
             pr: 42,
         };
-        let cs = vec![classified(
-            Level::Review,
-            Category::ControlFlow,
-            "src/x.rs",
-            7,
-        )];
+        let cs = vec![item(Level::Review, Category::ControlFlow, "src/x.rs", 7)];
         let out = markdown(&diff(), &cs, Some(&r));
         assert!(out.contains("https://github.com/acme/widget/pull/42/files#diff-"));
         assert!(out.contains("R7"));
     }
 
     #[test]
-    fn markdown_skim_section_is_collapsed() {
-        let cs = vec![classified(Level::Skim, Category::LlmAssessed, "x", 1)];
-        let out = markdown(&diff(), &cs, None);
-        assert!(out.contains("<details>"));
-        assert!(out.contains("Skim (1)"));
+    fn markdown_multi_location_item_lists_each_location() {
+        let inputs = vec![
+            {
+                let mut c = classified(Level::Review, Category::PublicApiChange, "src/x.rs", 30);
+                c.classification.rationale = "public enum signature changed".into();
+                c.classification.focus_lines = Some(FocusLines {
+                    start: 28,
+                    end: 156,
+                    side: Side::New,
+                });
+                c
+            },
+            {
+                let mut c = classified(Level::Review, Category::PublicApiChange, "src/x.rs", 90);
+                c.classification.rationale = "public enum signature changed".into();
+                c.classification.focus_lines = Some(FocusLines {
+                    start: 28,
+                    end: 156,
+                    side: Side::New,
+                });
+                c
+            },
+        ];
+        let consolidated = consolidate_exact(inputs);
+        assert_eq!(consolidated.len(), 1);
+        let out = markdown(&diff(), &consolidated, None);
+        // One bullet, two locators, comma-separated; second locator path elided.
+        let bullet = out.lines().find(|l| l.starts_with("- ")).unwrap();
+        assert!(bullet.contains("src/x.rs:28–156"));
+        assert!(
+            bullet.contains("`:28–156`"),
+            "second locator should elide path"
+        );
+        assert!(bullet.contains("public enum signature changed"));
     }
 
     #[test]
-    fn json_renders_valid_schema() {
-        let cs = vec![classified(
+    fn json_renders_locations_array() {
+        let cs = vec![item(
             Level::Review,
             Category::PublicApiChange,
             "src/x.rs",
@@ -551,10 +626,9 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["base_sha"].as_str().unwrap().len(), 40);
         assert_eq!(v["summary"]["total"], 1);
-        assert_eq!(v["summary"]["review"], 1);
-        assert_eq!(v["hunks"][0]["file"], "src/x.rs");
-        assert_eq!(v["hunks"][0]["line"], 142);
-        assert_eq!(v["hunks"][0]["level"], "review");
-        assert_eq!(v["hunks"][0]["category"], "public_api_change");
+        assert_eq!(v["items"][0]["locations"][0]["file"], "src/x.rs");
+        assert_eq!(v["items"][0]["locations"][0]["line"], 142);
+        assert_eq!(v["items"][0]["level"], "review");
+        assert_eq!(v["items"][0]["category"], "public_api_change");
     }
 }

@@ -336,6 +336,10 @@ pub fn parse_response(raw: &str, batch: &[Unclassified], config: &LlmConfig) -> 
     out
 }
 
+pub fn extract_json_for_consolidation(s: &str) -> &str {
+    extract_json(s)
+}
+
 fn extract_json(s: &str) -> &str {
     if let Some(start) = s.find('{') {
         if let Some(end) = s.rfind('}') {
