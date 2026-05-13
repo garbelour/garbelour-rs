@@ -217,21 +217,13 @@ let pipeline = Pipeline::standard(&PipelineConfig::default())?;
 let (classified, unclassified) = pipeline.run(&mut d);
 ```
 
-## Design notes
-
-- One subprocess to `git diff --raw -z -M -C` for file statuses (rename
-  detection), one to `git diff -U3 -M -C` for hunks (parsed via the
-  `patch` crate). File content for AST classifiers is loaded lazily via
-  `git show`.
-- Heuristics emit only `Skip` or `Review`. `Skim` requires positive
-  evidence, currently only the LLM emits it.
-- `focus_lines` pinpoints the specific line range that triggered each
-  classification, so the markdown deep link lands on the right line, not
-  just the start of the hunk.
-
 
 
 ## What is New in Garbelour
+
+### 0.4.0
+
+Refactored to support multiple findings per hunk.
 
 ### 0.3.0
 
