@@ -291,20 +291,25 @@ pub fn consolidate_llm(items: Vec<Item>, config: &LlmConfig) -> anyhow::Result<V
 
 const CONSOLIDATION_SYSTEM_PROMPT: &str =
     "You are consolidating duplicate findings from a code review tool. Each finding has an \
-     index, a file:line range, and one or more one-sentence rationales. Identify groups of \
-     findings that describe substantively the same kind of change repeated at different \
-     locations in the same file (e.g., the same modification pattern applied to a LowPass and \
-     a HighPass struct). Do not group findings that merely share a topic but describe \
-     different changes. Only group findings from the same file. Items in no group remain \
-     as-is. Respond with strict JSON only.";
+     index, a file:line range, a diff side (NEW = post-image, OLD = pre-image), and one or \
+     more one-sentence rationales. Identify groups of findings that describe substantively \
+     the same kind of change repeated at different locations in the same file (e.g., the same \
+     modification pattern applied to a LowPass and a HighPass struct). Do not group findings \
+     that merely share a topic but describe different changes. Only group findings from the \
+     same file AND the same side — never mix NEW-side and OLD-side items. Items in no group \
+     remain as-is. Respond with strict JSON only.";
 
 fn build_consolidation_prompt(items: &[Item], eligible: &[usize]) -> String {
     let mut out = String::new();
     out.push_str("Findings:\n");
     for &idx in eligible {
         let c = &items[idx];
+        let side_label = match c.side {
+            Side::New => "NEW",
+            Side::Old => "OLD",
+        };
         let loc = format!(
-            "{}:{}-{}",
+            "{}:{}-{} [{side_label}]",
             c.file_path.display(),
             c.range.start,
             c.range.end
@@ -322,8 +327,8 @@ fn build_consolidation_prompt(items: &[Item], eligible: &[usize]) -> String {
         "      \"ids\": [<indices, 2+>],\n",
         "      \"merged_rationale\": \"one sentence covering all grouped locations\"\n",
         "    }\n  ]\n}\n",
-        "Each id must appear in at most one group. Findings not listed in any group ",
-        "stay as-is.\n",
+        "Each id must appear in at most one group. All ids within a group must share the ",
+        "same file AND the same side. Findings not listed in any group stay as-is.\n",
     ));
     out
 }
@@ -425,9 +430,16 @@ pub(crate) fn parse_consolidation_response(
         {
             continue;
         }
-        // Enforce single-file grouping.
+        // Enforce single-file, single-side grouping. Cross-side merges
+        // would inherit the primary's side and produce incorrect anchors
+        // (e.g. an old-side item silently absorbed under a new-side primary
+        // would link to a non-existent post-image line).
         let first_file = &items[ids[0]].file_path;
-        if !ids.iter().all(|&i| &items[i].file_path == first_file) {
+        let first_side = items[ids[0]].side;
+        if !ids
+            .iter()
+            .all(|&i| &items[i].file_path == first_file && items[i].side == first_side)
+        {
             continue;
         }
         let rationale = g["merged_rationale"].as_str().unwrap_or("").to_string();
@@ -464,17 +476,34 @@ fn apply_groups(items: Vec<Item>, groups: Vec<Group>, config: &LlmConfig) -> Vec
         }
         let group = &groups[group_idx];
 
-        // Walk in declared id order. First member supplies file/side/range
-        // (the "primary"); subsequent members contribute findings and
-        // locations.
-        let mut merged_findings: Vec<Finding> = Vec::new();
-        let mut locations: Vec<Location> = Vec::new();
+        // Walk in declared id order. The first surviving member supplies
+        // (file_path, side, range) — the "primary". Defense-in-depth:
+        // even though `parse_consolidation_response` enforces same-file +
+        // same-side, any group member whose (file, side) doesn't match the
+        // primary is preserved as a standalone item rather than silently
+        // merged. Cross-side merges would produce inconsistent anchors
+        // (post-image locations linked from an old-side primary, etc).
         let mut primary_meta: Option<(PathBuf, Side, InclusiveLineRange)> = None;
         for &gi in &group.ids {
+            if let Some(item) = slots[gi].as_ref() {
+                primary_meta = Some((item.file_path.clone(), item.side, item.range));
+                break;
+            }
+        }
+        let Some((file_path, side, range)) = primary_meta else {
+            continue;
+        };
+
+        let mut merged_findings: Vec<Finding> = Vec::new();
+        let mut locations: Vec<Location> = Vec::new();
+        let mut matched_members: usize = 0;
+        for &gi in &group.ids {
             if let Some(item) = slots[gi].take() {
-                if primary_meta.is_none() {
-                    primary_meta = Some((item.file_path.clone(), item.side, item.range));
+                if item.file_path != file_path || item.side != side {
+                    out.push(item);
+                    continue;
                 }
+                matched_members += 1;
                 for loc in item.locations {
                     if !locations.iter().any(|l| l.hunk_id == loc.hunk_id) {
                         locations.push(loc);
@@ -484,9 +513,20 @@ fn apply_groups(items: Vec<Item>, groups: Vec<Group>, config: &LlmConfig) -> Vec
             }
         }
 
-        let Some((file_path, side, range)) = primary_meta else {
+        // If fewer than two members actually agreed on (file, side), don't
+        // synthesize a summary — emit the lone primary as a standalone item
+        // so the LLM's "these N describe the same change" rationale isn't
+        // attached to a single-member result.
+        if matched_members < 2 {
+            out.push(Item {
+                file_path,
+                side,
+                range,
+                locations,
+                findings: merged_findings,
+            });
             continue;
-        };
+        }
 
         // Synthesized summary finding from the model's merged rationale,
         // prepended so it renders first. Level = max of contained findings.
@@ -815,5 +855,121 @@ mod tests {
         let raw = r#"{"groups":[{"ids":[0,1],"merged_rationale":"both"}]}"#;
         let groups = parse_consolidation_response(raw, &[0, 1], &items);
         assert!(groups.is_empty(), "cross-file group should be rejected");
+    }
+
+    /// `apply_groups` is defense-in-depth: even if a malformed group with
+    /// mixed sides slips past `parse_consolidation_response`, the mismatched
+    /// member is preserved as a standalone item rather than absorbed under
+    /// the primary's anchor.
+    #[test]
+    fn apply_groups_preserves_off_side_members_as_standalone() {
+        let cfg = LlmConfig {
+            provider: LlmProvider::Anthropic,
+            model: "test".into(),
+            api_key: "x".into(),
+            base_url: "http://localhost".into(),
+        };
+        let items = vec![
+            // primary: new-side
+            Item {
+                file_path: PathBuf::from("src/a.rs"),
+                side: Side::New,
+                range: InclusiveLineRange { start: 1, end: 5 },
+                locations: vec![Location {
+                    hunk_id: HunkId("a:1".into()),
+                    new_range: LineRange { start: 1, count: 5 },
+                    old_range: LineRange { start: 1, count: 5 },
+                }],
+                findings: vec![finding(
+                    Level::Review,
+                    Category::PublicApiChange,
+                    "primary",
+                    Some((1, 5, Side::New)),
+                )],
+            },
+            // off-side member: old-side
+            Item {
+                file_path: PathBuf::from("src/a.rs"),
+                side: Side::Old,
+                range: InclusiveLineRange { start: 10, end: 15 },
+                locations: vec![Location {
+                    hunk_id: HunkId("a:10".into()),
+                    new_range: LineRange {
+                        start: 10,
+                        count: 5,
+                    },
+                    old_range: LineRange {
+                        start: 10,
+                        count: 5,
+                    },
+                }],
+                findings: vec![finding(
+                    Level::Review,
+                    Category::PublicApiChange,
+                    "off-side",
+                    Some((10, 15, Side::Old)),
+                )],
+            },
+        ];
+        let groups = vec![Group {
+            ids: vec![0, 1],
+            rationale: "should be rejected as mixed-side".into(),
+        }];
+        let out = apply_groups(items, groups, &cfg);
+        assert_eq!(out.len(), 2);
+        // The off-side member is preserved with its original side and
+        // rationale intact.
+        let off = out.iter().find(|i| i.side == Side::Old).unwrap();
+        assert_eq!(off.findings.len(), 1);
+        assert_eq!(off.findings[0].rationale, "off-side");
+        // The primary stayed on the new side, single-member (no synthesized
+        // summary finding from the LLM).
+        let prim = out.iter().find(|i| i.side == Side::New).unwrap();
+        assert_eq!(prim.findings.len(), 1);
+        assert_eq!(prim.findings[0].rationale, "primary");
+    }
+
+    #[test]
+    fn parse_consolidation_response_rejects_cross_side_groups() {
+        let items = vec![
+            Item {
+                file_path: PathBuf::from("src/a.rs"),
+                side: Side::New,
+                range: InclusiveLineRange { start: 1, end: 5 },
+                locations: vec![Location {
+                    hunk_id: HunkId("a:1".into()),
+                    new_range: LineRange { start: 1, count: 5 },
+                    old_range: LineRange { start: 1, count: 5 },
+                }],
+                findings: vec![finding(
+                    Level::Review,
+                    Category::PublicApiChange,
+                    "new",
+                    Some((1, 5, Side::New)),
+                )],
+            },
+            Item {
+                file_path: PathBuf::from("src/a.rs"),
+                side: Side::Old,
+                range: InclusiveLineRange { start: 1, end: 5 },
+                locations: vec![Location {
+                    hunk_id: HunkId("a:1".into()),
+                    new_range: LineRange { start: 1, count: 5 },
+                    old_range: LineRange { start: 1, count: 5 },
+                }],
+                findings: vec![finding(
+                    Level::Review,
+                    Category::PublicApiChange,
+                    "old",
+                    Some((1, 5, Side::Old)),
+                )],
+            },
+        ];
+        let raw = r#"{"groups":[{"ids":[0,1],"merged_rationale":"both"}]}"#;
+        let groups = parse_consolidation_response(raw, &[0, 1], &items);
+        assert!(
+            groups.is_empty(),
+            "cross-side group (same file) should be rejected"
+        );
     }
 }

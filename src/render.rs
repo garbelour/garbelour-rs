@@ -43,7 +43,7 @@ impl Summary {
 pub fn summary_line(items: &[Item]) -> String {
     let s = Summary::from_items(items);
     format!(
-        "garbelour: {} of {} hunks need review, {} worth skimming, {} mechanical",
+        "garbelour: {} of {} items need review, {} worth skimming, {} mechanical",
         s.review, s.total, s.skim, s.skip
     )
 }
@@ -215,11 +215,21 @@ fn human_locator(c: &Item) -> String {
         return primary;
     }
     // Stage-B-merged items: append extra-location starts (path elided).
+    // Use the item's side to pick old vs new line, otherwise old-side
+    // items would emit post-image line numbers.
     let mut parts = vec![primary];
     for loc in c.locations.iter().skip(1) {
-        parts.push(format!(":{}", loc.new_range.start));
+        parts.push(format!(":{}", location_line(loc, c.side)));
     }
     parts.join(", ")
+}
+
+/// Pick the line number from a `Location` matching the item's side.
+fn location_line(loc: &crate::consolidate::Location, side: Side) -> u32 {
+    match side {
+        Side::New => loc.new_range.start,
+        Side::Old => loc.old_range.start,
+    }
 }
 
 fn preview_paths(paths: &[&String]) -> String {
@@ -322,7 +332,7 @@ pub fn markdown(_diff: &Diff, items: &[Item], repo_ref: Option<&RepoRef>) -> Str
     out.push_str(STICKY_MARKER);
     out.push_str("\n## Garbelour\n\n");
     out.push_str(&format!(
-        "**{} of {} hunks need review.** {} worth skimming. {} mechanical.\n",
+        "**{} of {} items need review.** {} worth skimming. {} mechanical.\n",
         s.review, s.total, s.skim, s.skip
     ));
 
@@ -403,13 +413,10 @@ fn markdown_anchor(c: &Item, repo_ref: Option<&RepoRef>) -> String {
     }
     let mut parts = vec![primary_label];
     for loc in c.locations.iter().skip(1) {
-        let label = format!("`:{}`", loc.new_range.start);
+        let line = location_line(loc, c.side);
+        let label = format!("`:{}`", line);
         let part = if let Some(r) = repo_ref {
-            format!(
-                "[{}]({})",
-                label,
-                deep_link(r, &path_str, loc.new_range.start, c.side)
-            )
+            format!("[{}]({})", label, deep_link(r, &path_str, line, c.side))
         } else {
             label
         };
