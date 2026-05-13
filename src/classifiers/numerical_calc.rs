@@ -23,7 +23,7 @@ use std::collections::HashSet;
 use tree_sitter::{Node, Tree};
 
 use crate::ast::{parse, walk};
-use crate::classify::{Category, Classification, Classifier, FocusLines, Level, Side, Source};
+use crate::classify::{Category, Classifier, Finding, FocusLines, Level, Side, Source};
 use crate::diff::{FileDiff, Hunk};
 use crate::lang::Language;
 
@@ -55,28 +55,32 @@ impl Classifier for NumericalCalc {
         140
     }
 
-    fn classify(&self, file: &mut FileDiff, hunk: &Hunk) -> Option<Classification> {
-        let language = file.language?;
+    fn classify(&self, file: &mut FileDiff, hunk: &Hunk) -> Vec<Finding> {
+        let Some(language) = file.language else {
+            return Vec::new();
+        };
         if hunk.added_lines.is_empty() && hunk.removed_lines.is_empty() {
-            return None;
+            return Vec::new();
         }
         let _ = file.ensure_content();
 
+        let mut findings: Vec<Finding> = Vec::new();
+
         if !hunk.added_lines.is_empty() {
             if let Some(content) = file.new_content.as_deref() {
-                if let Some(hit) = detect(language, content, &hunk.added_lines) {
-                    return Some(make(hit, Side::New));
+                for hit in detect(language, content, &hunk.added_lines) {
+                    findings.push(make(hit, Side::New));
                 }
             }
         }
         if !hunk.removed_lines.is_empty() {
             if let Some(content) = file.old_content.as_deref() {
-                if let Some(hit) = detect(language, content, &hunk.removed_lines) {
-                    return Some(make(hit, Side::Old));
+                for hit in detect(language, content, &hunk.removed_lines) {
+                    findings.push(make(hit, Side::Old));
                 }
             }
         }
-        None
+        findings
     }
 }
 
@@ -86,7 +90,7 @@ struct Hit {
     what: String,
 }
 
-fn make(hit: Hit, side: Side) -> Classification {
+fn make(hit: Hit, side: Side) -> Finding {
     let rationale = match side {
         Side::New => format!("{} at lines {}–{}", hit.what, hit.start, hit.end),
         Side::Old => format!(
@@ -94,7 +98,7 @@ fn make(hit: Hit, side: Side) -> Classification {
             hit.what, hit.start, hit.end
         ),
     };
-    Classification {
+    Finding {
         level: Level::Review,
         category: Category::NumericalCalc,
         rationale,
@@ -109,11 +113,18 @@ fn make(hit: Hit, side: Side) -> Classification {
     }
 }
 
-fn detect(language: Language, content: &str, target_lines: &[u32]) -> Option<Hit> {
+/// Collect every numerical-calc signal (multi-op arithmetic node + math
+/// namespace call line) that intersects `target_lines`. Deduped by start/end.
+fn detect(language: Language, content: &str, target_lines: &[u32]) -> Vec<Hit> {
+    let mut out: Vec<Hit> = Vec::new();
+    let mut seen: HashSet<(u32, u32)> = HashSet::new();
+
     if let Some(tree) = parse(language, content) {
         let targets: HashSet<u32> = target_lines.iter().copied().collect();
-        if let Some(hit) = find_multi_op_arithmetic(language, &tree, &targets) {
-            return Some(hit);
+        for hit in collect_multi_op_arithmetic(language, &tree, &targets) {
+            if seen.insert((hit.start, hit.end)) {
+                out.push(hit);
+            }
         }
     }
     let lines: Vec<&str> = content.lines().collect();
@@ -123,26 +134,25 @@ fn detect(language: Language, content: &str, target_lines: &[u32]) -> Option<Hit
             continue;
         }
         if let Some(label) = math_namespace_in(lines[idx]) {
-            return Some(Hit {
-                start: ln,
-                end: ln,
-                what: label.to_string(),
-            });
+            if seen.insert((ln, ln)) {
+                out.push(Hit {
+                    start: ln,
+                    end: ln,
+                    what: label.to_string(),
+                });
+            }
         }
     }
-    None
+    out
 }
 
-fn find_multi_op_arithmetic(
+fn collect_multi_op_arithmetic(
     language: Language,
     tree: &Tree,
     targets: &HashSet<u32>,
-) -> Option<Hit> {
-    let mut hit: Option<Hit> = None;
+) -> Vec<Hit> {
+    let mut out: Vec<Hit> = Vec::new();
     walk(tree.root_node(), &mut |node| {
-        if hit.is_some() {
-            return;
-        }
         if !is_arithmetic_binary(language, node) {
             return;
         }
@@ -152,18 +162,16 @@ fn find_multi_op_arithmetic(
         }
         let s = node.start_position().row as u32 + 1;
         let e = node.end_position().row as u32 + 1;
-        for ln in s..=e {
-            if targets.contains(&ln) {
-                hit = Some(Hit {
-                    start: s,
-                    end: e,
-                    what: format!("arithmetic expression ({} operators)", total),
-                });
-                return;
-            }
+        let intersects = (s..=e).any(|ln| targets.contains(&ln));
+        if intersects {
+            out.push(Hit {
+                start: s,
+                end: e,
+                what: format!("arithmetic expression ({} operators)", total),
+            });
         }
     });
-    hit
+    out
 }
 
 fn is_arithmetic_binary(language: Language, node: &Node) -> bool {
@@ -276,10 +284,11 @@ mod tests {
         let old = "fn f(a: f64, b: f64) -> f64 {\n    a\n}\n";
         let new = "fn f(a: f64, b: f64) -> f64 {\n    a * a + b * b\n}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![2], vec![2]);
-        let result = NumericalCalc::new().classify(&mut f, &h).unwrap();
-        assert_eq!(result.category, Category::NumericalCalc);
-        assert_eq!(result.level, Level::Review);
-        assert!(result.rationale.contains("arithmetic expression"));
+        let result = NumericalCalc::new().classify(&mut f, &h);
+        assert!(!result.is_empty());
+        assert_eq!(result[0].category, Category::NumericalCalc);
+        assert_eq!(result[0].level, Level::Review);
+        assert!(result[0].rationale.contains("arithmetic expression"));
     }
 
     #[test]
@@ -288,7 +297,7 @@ mod tests {
         let new = "fn f(i: usize) -> usize {\n    i + 1\n}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![2], vec![2]);
         // Single arithmetic operator, no nesting — should not fire.
-        assert!(NumericalCalc::new().classify(&mut f, &h).is_none());
+        assert!(NumericalCalc::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -296,9 +305,10 @@ mod tests {
         let old = "fn f(x: f64) -> f64 {\n    x\n}\n";
         let new = "fn f(x: f64) -> f64 {\n    f64::sin(x)\n}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![2], vec![2]);
-        let result = NumericalCalc::new().classify(&mut f, &h).unwrap();
-        assert_eq!(result.category, Category::NumericalCalc);
-        assert!(result.rationale.contains("f64::"));
+        let result = NumericalCalc::new().classify(&mut f, &h);
+        assert!(!result.is_empty());
+        assert_eq!(result[0].category, Category::NumericalCalc);
+        assert!(result.iter().any(|r| r.rationale.contains("f64::")));
     }
 
     #[test]
@@ -306,9 +316,9 @@ mod tests {
         let old = "def f(x):\n    return x\n";
         let new = "def f(x):\n    return np.dot(x, x)\n";
         let (mut f, h) = fixture(Language::Python, old, new, vec![2], vec![2]);
-        let result = NumericalCalc::new().classify(&mut f, &h).unwrap();
-        assert_eq!(result.category, Category::NumericalCalc);
-        assert!(result.rationale.contains("np."));
+        let result = NumericalCalc::new().classify(&mut f, &h);
+        assert!(!result.is_empty());
+        assert!(result.iter().any(|r| r.rationale.contains("np.")));
     }
 
     #[test]
@@ -316,7 +326,7 @@ mod tests {
         let old = "def f(a, b):\n    return a\n";
         let new = "def f(a, b):\n    return a * a + b * b\n";
         let (mut f, h) = fixture(Language::Python, old, new, vec![2], vec![2]);
-        assert!(NumericalCalc::new().classify(&mut f, &h).is_some());
+        assert!(!NumericalCalc::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -324,8 +334,8 @@ mod tests {
         let old = "function f(x: number): number { return x; }\n";
         let new = "function f(x: number): number { return Math.sqrt(x); }\n";
         let (mut f, h) = fixture(Language::TypeScript, old, new, vec![1], vec![1]);
-        let result = NumericalCalc::new().classify(&mut f, &h).unwrap();
-        assert!(result.rationale.contains("Math."));
+        let result = NumericalCalc::new().classify(&mut f, &h);
+        assert!(result.iter().any(|r| r.rationale.contains("Math.")));
     }
 
     #[test]
@@ -333,7 +343,7 @@ mod tests {
         let old = "function f(a, b) { return a; }\n";
         let new = "function f(a, b) { return a * a + b * b; }\n";
         let (mut f, h) = fixture(Language::JavaScript, old, new, vec![1], vec![1]);
-        assert!(NumericalCalc::new().classify(&mut f, &h).is_some());
+        assert!(!NumericalCalc::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -341,9 +351,16 @@ mod tests {
         let old = "fn f(a: f64, b: f64) -> f64 {\n    a * a + b * b\n}\n";
         let new = "fn f(a: f64, _b: f64) -> f64 {\n    a\n}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![1, 2], vec![1, 2]);
-        let result = NumericalCalc::new().classify(&mut f, &h).unwrap();
-        assert_eq!(result.focus_lines.unwrap().side, Side::Old);
-        assert!(result.rationale.contains("removed at old lines"));
+        let result = NumericalCalc::new().classify(&mut f, &h);
+        let old_hit = result
+            .iter()
+            .find(|r| {
+                r.focus_lines
+                    .as_ref()
+                    .is_some_and(|fl| fl.side == Side::Old)
+            })
+            .expect("expected an old-side hit");
+        assert!(old_hit.rationale.contains("removed at old lines"));
     }
 
     #[test]
@@ -351,6 +368,24 @@ mod tests {
         let old = "fn f() -> String { String::new() }\n";
         let new = "fn f() -> String { String::from(\"hi\") }\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![1], vec![1]);
-        assert!(NumericalCalc::new().classify(&mut f, &h).is_none());
+        assert!(NumericalCalc::new().classify(&mut f, &h).is_empty());
+    }
+
+    /// Two independent multi-op arithmetic expressions on different lines
+    /// produce two findings.
+    #[test]
+    fn rust_two_independent_multi_op_expressions_produce_two_findings() {
+        let old = "fn f(a: f64, b: f64) -> f64 { a }\n";
+        let new = "fn f(a: f64, b: f64) -> f64 {\n    let x = a * a + b * b;\n    let y = (a - b) * (a + b);\n    x + y\n}\n";
+        let (mut f, h) = fixture(Language::Rust, old, new, vec![2, 3], vec![]);
+        let result = NumericalCalc::new().classify(&mut f, &h);
+        let arith_count = result
+            .iter()
+            .filter(|r| r.rationale.contains("arithmetic expression"))
+            .count();
+        assert!(
+            arith_count >= 2,
+            "expected >=2 arithmetic findings, got {arith_count}: {result:?}"
+        );
     }
 }

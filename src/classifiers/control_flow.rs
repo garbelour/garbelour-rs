@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use tree_sitter::Tree;
 
 use crate::ast::{parse, walk};
-use crate::classify::{Category, Classification, Classifier, FocusLines, Level, Side, Source};
+use crate::classify::{Category, Classifier, Finding, FocusLines, Level, Side, Source};
 use crate::diff::{FileDiff, Hunk};
 use crate::lang::Language;
 
@@ -43,23 +43,25 @@ impl Classifier for ControlFlow {
         130
     }
 
-    fn classify(&self, file: &mut FileDiff, hunk: &Hunk) -> Option<Classification> {
-        let language = file.language?;
+    fn classify(&self, file: &mut FileDiff, hunk: &Hunk) -> Vec<Finding> {
+        let Some(language) = file.language else {
+            return Vec::new();
+        };
         if hunk.added_lines.is_empty() && hunk.removed_lines.is_empty() {
-            return None;
+            return Vec::new();
         }
 
         let _ = file.ensure_content();
 
-        // Added side first: if a new control-flow node starts on an added
-        // line, that's the most informative case (focus_lines points at the
-        // new branch).
+        let mut findings: Vec<Finding> = Vec::new();
+
+        // New side: every control-flow node starting on an added line.
         if !hunk.added_lines.is_empty() {
             if let Some(content) = file.new_content.as_deref() {
                 if let Some(tree) = parse(language, content) {
                     let added: HashSet<u32> = hunk.added_lines.iter().copied().collect();
-                    if let Some((kind, range)) = find_control_flow_node(language, &tree, &added) {
-                        return Some(Classification {
+                    for (kind, range) in collect_control_flow_nodes(language, &tree, &added) {
+                        findings.push(Finding {
                             level: Level::Review,
                             category: Category::ControlFlow,
                             rationale: format!("{} at lines {}–{}", kind, range.0, range.1),
@@ -77,13 +79,13 @@ impl Classifier for ControlFlow {
             }
         }
 
-        // Removed side: a control-flow node was deleted.
+        // Old side: every control-flow node starting on a removed line.
         if !hunk.removed_lines.is_empty() {
             if let Some(content) = file.old_content.as_deref() {
                 if let Some(tree) = parse(language, content) {
                     let removed: HashSet<u32> = hunk.removed_lines.iter().copied().collect();
-                    if let Some((kind, range)) = find_control_flow_node(language, &tree, &removed) {
-                        return Some(Classification {
+                    for (kind, range) in collect_control_flow_nodes(language, &tree, &removed) {
+                        findings.push(Finding {
                             level: Level::Review,
                             category: Category::ControlFlow,
                             rationale: format!(
@@ -104,22 +106,19 @@ impl Classifier for ControlFlow {
             }
         }
 
-        None
+        findings
     }
 }
 
-/// Find the first control-flow node whose start line is in `targets`.
-/// Returns the node's human-readable kind label and its full line range.
-fn find_control_flow_node(
+/// Collect every control-flow node whose start line is in `targets`.
+/// Returns one entry per node (human-readable kind label + line range).
+fn collect_control_flow_nodes(
     language: Language,
     tree: &Tree,
     targets: &HashSet<u32>,
-) -> Option<(&'static str, (u32, u32))> {
-    let mut found: Option<(&'static str, (u32, u32))> = None;
+) -> Vec<(&'static str, (u32, u32))> {
+    let mut out: Vec<(&'static str, (u32, u32))> = Vec::new();
     walk(tree.root_node(), &mut |node| {
-        if found.is_some() {
-            return;
-        }
         let label = match control_flow_label(language, node.kind()) {
             Some(l) => l,
             None => return,
@@ -127,10 +126,10 @@ fn find_control_flow_node(
         let start_row = node.start_position().row as u32 + 1;
         let end_row = node.end_position().row as u32 + 1;
         if targets.contains(&start_row) {
-            found = Some((label, (start_row, end_row)));
+            out.push((label, (start_row, end_row)));
         }
     });
-    found
+    out
 }
 
 fn control_flow_label(language: Language, kind: &str) -> Option<&'static str> {
@@ -217,10 +216,11 @@ mod tests {
         let old = "fn f() {\n    foo();\n}\n";
         let new = "fn f() {\n    if x {\n        foo();\n    }\n}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![2, 4], vec![]);
-        let result = ControlFlow::new().classify(&mut f, &h).unwrap();
-        assert_eq!(result.category, Category::ControlFlow);
-        assert_eq!(result.level, Level::Review);
-        let focus = result.focus_lines.unwrap();
+        let result = ControlFlow::new().classify(&mut f, &h);
+        assert!(!result.is_empty());
+        assert_eq!(result[0].category, Category::ControlFlow);
+        assert_eq!(result[0].level, Level::Review);
+        let focus = result[0].focus_lines.as_ref().unwrap();
         assert_eq!(focus.side, Side::New);
         assert_eq!(focus.start, 2);
     }
@@ -230,7 +230,7 @@ mod tests {
         let old = "fn f() {\n    if x {\n        foo();\n    }\n}\n";
         let new = "fn f() {\n    if x && y {\n        foo();\n    }\n}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![2], vec![2]);
-        assert!(ControlFlow::new().classify(&mut f, &h).is_some());
+        assert!(!ControlFlow::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -239,7 +239,7 @@ mod tests {
         let new = "fn f() {\n    if x {\n        bar();\n    }\n}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![3], vec![3]);
         // Line 3 is the body, not the `if` head.
-        assert!(ControlFlow::new().classify(&mut f, &h).is_none());
+        assert!(ControlFlow::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -247,8 +247,9 @@ mod tests {
         let old = "fn f(x: u32) {\n    match x {\n        _ => {}\n    }\n}\n";
         let new = "fn f(_x: u32) {\n}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![1, 2], vec![1, 2, 3, 4]);
-        let result = ControlFlow::new().classify(&mut f, &h).unwrap();
-        assert_eq!(result.category, Category::ControlFlow);
+        let result = ControlFlow::new().classify(&mut f, &h);
+        assert!(!result.is_empty());
+        assert_eq!(result[0].category, Category::ControlFlow);
     }
 
     #[test]
@@ -256,7 +257,22 @@ mod tests {
         let old = "fn f(x: u32) -> u32 {\n    x + 1\n}\n";
         let new = "fn f(x: u32) -> u32 {\n    return x + 1;\n}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![2], vec![2]);
-        assert!(ControlFlow::new().classify(&mut f, &h).is_some());
+        assert!(!ControlFlow::new().classify(&mut f, &h).is_empty());
+    }
+
+    /// Two added control-flow nodes in the same hunk produce two findings.
+    #[test]
+    fn rust_two_added_control_flow_nodes_produce_two_findings() {
+        let old = "fn f(x: u32) -> u32 {\n    x\n}\n";
+        let new = "fn f(x: u32) -> u32 {\n    if x > 0 { return 1; }\n    if x < 0 { return -1; }\n    x\n}\n";
+        let (mut f, h) = fixture(Language::Rust, old, new, vec![2, 3], vec![]);
+        let result = ControlFlow::new().classify(&mut f, &h);
+        // Two if-branch findings (plus possibly inner return findings).
+        let if_count = result
+            .iter()
+            .filter(|r| r.rationale.starts_with("if-branch"))
+            .count();
+        assert_eq!(if_count, 2);
     }
 
     #[test]
@@ -264,7 +280,7 @@ mod tests {
         let old = "def f(x):\n    return x\n";
         let new = "def f(x):\n    if x > 0:\n        return x\n    return 0\n";
         let (mut f, h) = fixture(Language::Python, old, new, vec![2, 3, 4], vec![2]);
-        assert!(ControlFlow::new().classify(&mut f, &h).is_some());
+        assert!(!ControlFlow::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -272,7 +288,7 @@ mod tests {
         let old = "def f(xs):\n    return xs\n";
         let new = "def f(xs):\n    for x in xs:\n        print(x)\n    return xs\n";
         let (mut f, h) = fixture(Language::Python, old, new, vec![2, 3], vec![]);
-        assert!(ControlFlow::new().classify(&mut f, &h).is_some());
+        assert!(!ControlFlow::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -280,7 +296,7 @@ mod tests {
         let old = "function f(x: number): number {\n    return x;\n}\n";
         let new = "function f(x: number): number {\n    if (x > 0) {\n        return x;\n    }\n    return 0;\n}\n";
         let (mut f, h) = fixture(Language::TypeScript, old, new, vec![2, 3, 4, 5], vec![2]);
-        assert!(ControlFlow::new().classify(&mut f, &h).is_some());
+        assert!(!ControlFlow::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -294,7 +310,7 @@ mod tests {
             vec![1, 2, 3, 4, 5, 6],
             vec![1],
         );
-        assert!(ControlFlow::new().classify(&mut f, &h).is_some());
+        assert!(!ControlFlow::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -302,6 +318,6 @@ mod tests {
         let old = "fn f() {\n    let x = 1;\n}\n";
         let new = "fn f() {\n    let y = 2;\n}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![2], vec![2]);
-        assert!(ControlFlow::new().classify(&mut f, &h).is_none());
+        assert!(ControlFlow::new().classify(&mut f, &h).is_empty());
     }
 }

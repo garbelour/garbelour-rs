@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
-use crate::classify::{Category, Classification, Classifier, Level, Source};
+use crate::classify::{Category, Classifier, Finding, Level, Source};
 use crate::diff::{FileDiff, Hunk};
 
 /// Default globs. Extended via `[classify].generated_globs` in `garbelour.toml`.
@@ -66,7 +66,7 @@ impl Classifier for Generated {
         0
     }
 
-    fn classify(&self, file: &mut FileDiff, _hunk: &Hunk) -> Option<Classification> {
+    fn classify(&self, file: &mut FileDiff, _hunk: &Hunk) -> Vec<Finding> {
         let matched_glob = self.globset.is_match(&file.path);
         let matched_path = self.paths.contains(&file.path);
         if matched_glob || matched_path {
@@ -75,7 +75,7 @@ impl Classifier for Generated {
             } else {
                 "matches generated_globs"
             };
-            Some(Classification {
+            vec![Finding {
                 level: Level::Skip,
                 category: Category::Generated,
                 rationale: format!("generated file ({})", reason),
@@ -83,9 +83,9 @@ impl Classifier for Generated {
                     name: "generated".into(),
                 },
                 focus_lines: None,
-            })
+            }]
         } else {
-            None
+            Vec::new()
         }
     }
 }
@@ -181,7 +181,7 @@ mod tests {
         ] {
             let mut f = file(path);
             assert!(
-                cls.classify(&mut f, &hunk()).is_some(),
+                !cls.classify(&mut f, &hunk()).is_empty(),
                 "should match default glob: {path}"
             );
         }
@@ -191,14 +191,14 @@ mod tests {
     fn does_not_match_arbitrary_source() {
         let cls = Generated::new(vec![], HashSet::new()).unwrap();
         let mut f = file("src/main.rs");
-        assert!(cls.classify(&mut f, &hunk()).is_none());
+        assert!(cls.classify(&mut f, &hunk()).is_empty());
     }
 
     #[test]
     fn matches_extra_glob_from_config() {
         let cls = Generated::new(vec!["generated/**".into()], HashSet::new()).unwrap();
         let mut f = file("generated/types.ts");
-        assert!(cls.classify(&mut f, &hunk()).is_some());
+        assert!(!cls.classify(&mut f, &hunk()).is_empty());
     }
 
     #[test]
@@ -207,8 +207,9 @@ mod tests {
         paths.insert(PathBuf::from("docs/api.json"));
         let cls = Generated::new(vec![], paths).unwrap();
         let mut f = file("docs/api.json");
-        let result = cls.classify(&mut f, &hunk()).unwrap();
-        assert!(result.rationale.contains("linguist-generated"));
+        let result = cls.classify(&mut f, &hunk());
+        assert_eq!(result.len(), 1);
+        assert!(result[0].rationale.contains("linguist-generated"));
     }
 
     #[test]

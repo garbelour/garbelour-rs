@@ -15,7 +15,7 @@
 use tree_sitter::Tree;
 
 use crate::ast::{collect_line_ranges, is_blank_line, lines_all_within, parse, walk};
-use crate::classify::{Category, Classification, Classifier, Level, Source};
+use crate::classify::{Category, Classifier, Finding, Level, Source};
 use crate::diff::{FileDiff, Hunk};
 use crate::lang::Language;
 
@@ -42,20 +42,30 @@ impl Classifier for CommentOnly {
         100
     }
 
-    fn classify(&self, file: &mut FileDiff, hunk: &Hunk) -> Option<Classification> {
-        let language = file.language?;
+    fn classify(&self, file: &mut FileDiff, hunk: &Hunk) -> Vec<Finding> {
+        let Some(language) = file.language else {
+            return Vec::new();
+        };
 
         // No work to do if neither side has changed lines (rare but possible
         // for context-only hunks).
         if hunk.added_lines.is_empty() && hunk.removed_lines.is_empty() {
-            return None;
+            return Vec::new();
         }
 
         let _ = file.ensure_content();
-        let old_content = file.old_content.as_deref()?;
-        let new_content = file.new_content.as_deref()?;
-        let old_tree = parse(language, old_content)?;
-        let new_tree = parse(language, new_content)?;
+        let Some(old_content) = file.old_content.as_deref() else {
+            return Vec::new();
+        };
+        let Some(new_content) = file.new_content.as_deref() else {
+            return Vec::new();
+        };
+        let Some(old_tree) = parse(language, old_content) else {
+            return Vec::new();
+        };
+        let Some(new_tree) = parse(language, new_content) else {
+            return Vec::new();
+        };
 
         let old_ranges = comment_ranges(language, &old_tree);
         let new_ranges = comment_ranges(language, &new_tree);
@@ -68,13 +78,13 @@ impl Classifier for CommentOnly {
             non_blank_lines(&hunk.added_lines, &hunk.new_lines, hunk.new_range.start);
 
         if !lines_all_within(&removed_non_blank, &old_ranges) {
-            return None;
+            return Vec::new();
         }
         if !lines_all_within(&added_non_blank, &new_ranges) {
-            return None;
+            return Vec::new();
         }
 
-        Some(Classification {
+        vec![Finding {
             level: Level::Skip,
             category: Category::CommentOnly,
             rationale: "comment/docstring-only change".into(),
@@ -82,7 +92,7 @@ impl Classifier for CommentOnly {
                 name: "comment_only".into(),
             },
             focus_lines: None,
-        })
+        }]
     }
 }
 
@@ -199,9 +209,10 @@ mod tests {
         let old = "// one\nfn a() {}\n";
         let new = "// two\nfn a() {}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![1], vec![1]);
-        let result = CommentOnly::new().classify(&mut f, &h).unwrap();
-        assert_eq!(result.category, Category::CommentOnly);
-        assert_eq!(result.level, Level::Skip);
+        let result = CommentOnly::new().classify(&mut f, &h);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].category, Category::CommentOnly);
+        assert_eq!(result[0].level, Level::Skip);
     }
 
     #[test]
@@ -209,7 +220,7 @@ mod tests {
         let old = "/// old doc\nfn a() {}\n";
         let new = "/// new doc\nfn a() {}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![1], vec![1]);
-        assert!(CommentOnly::new().classify(&mut f, &h).is_some());
+        assert!(!CommentOnly::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -217,7 +228,7 @@ mod tests {
         let old = "/* old */\nfn a() {}\n";
         let new = "/* new */\nfn a() {}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![1], vec![1]);
-        assert!(CommentOnly::new().classify(&mut f, &h).is_some());
+        assert!(!CommentOnly::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -225,7 +236,7 @@ mod tests {
         let old = "fn a() { 1 }\n";
         let new = "fn a() { 2 }\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![1], vec![1]);
-        assert!(CommentOnly::new().classify(&mut f, &h).is_none());
+        assert!(CommentOnly::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -233,7 +244,7 @@ mod tests {
         let old = "// note\nfn a() { 1 }\n";
         let new = "// updated\nfn a() { 2 }\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![1, 2], vec![1, 2]);
-        assert!(CommentOnly::new().classify(&mut f, &h).is_none());
+        assert!(CommentOnly::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -243,7 +254,7 @@ mod tests {
         let (mut f, h) = fixture(Language::Rust, old, new, vec![2], vec![]);
         // Line 2 in new is a blank line — it should be tolerated even though
         // it's not inside any comment node.
-        assert!(CommentOnly::new().classify(&mut f, &h).is_some());
+        assert!(!CommentOnly::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -251,7 +262,7 @@ mod tests {
         let old = "# old\ndef a():\n    return 1\n";
         let new = "# new\ndef a():\n    return 1\n";
         let (mut f, h) = fixture(Language::Python, old, new, vec![1], vec![1]);
-        assert!(CommentOnly::new().classify(&mut f, &h).is_some());
+        assert!(!CommentOnly::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -261,7 +272,7 @@ mod tests {
         let (mut f, h) = fixture(Language::Python, old, new, vec![1], vec![1]);
         let result = CommentOnly::new().classify(&mut f, &h);
         assert!(
-            result.is_some(),
+            !result.is_empty(),
             "module docstring change should classify as comment-only"
         );
     }
@@ -271,7 +282,7 @@ mod tests {
         let old = "def a():\n    \"\"\"old\"\"\"\n    return 1\n";
         let new = "def a():\n    \"\"\"new\"\"\"\n    return 1\n";
         let (mut f, h) = fixture(Language::Python, old, new, vec![2], vec![2]);
-        assert!(CommentOnly::new().classify(&mut f, &h).is_some());
+        assert!(!CommentOnly::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -279,7 +290,7 @@ mod tests {
         let old = "// old\nexport const x = 1;\n";
         let new = "// new\nexport const x = 1;\n";
         let (mut f, h) = fixture(Language::TypeScript, old, new, vec![1], vec![1]);
-        assert!(CommentOnly::new().classify(&mut f, &h).is_some());
+        assert!(!CommentOnly::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -287,7 +298,7 @@ mod tests {
         let old = "/* old\n * note\n */\nconst x = 1;\n";
         let new = "/* new\n * note\n */\nconst x = 1;\n";
         let (mut f, h) = fixture(Language::JavaScript, old, new, vec![1], vec![1]);
-        assert!(CommentOnly::new().classify(&mut f, &h).is_some());
+        assert!(!CommentOnly::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -296,7 +307,7 @@ mod tests {
         let new = "different\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![1], vec![1]);
         f.language = None;
-        assert!(CommentOnly::new().classify(&mut f, &h).is_none());
+        assert!(CommentOnly::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -305,6 +316,6 @@ mod tests {
         let new = "// two\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![1], vec![1]);
         f.old_content = None;
-        assert!(CommentOnly::new().classify(&mut f, &h).is_none());
+        assert!(CommentOnly::new().classify(&mut f, &h).is_empty());
     }
 }

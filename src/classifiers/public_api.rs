@@ -15,7 +15,7 @@
 use tree_sitter::{Node, Tree};
 
 use crate::ast::{node_lines, parse, walk};
-use crate::classify::{Category, Classification, Classifier, FocusLines, Level, Side, Source};
+use crate::classify::{Category, Classifier, Finding, FocusLines, Level, Side, Source};
 use crate::diff::{FileDiff, Hunk};
 use crate::lang::Language;
 
@@ -42,55 +42,35 @@ impl Classifier for PublicApi {
         120
     }
 
-    fn classify(&self, file: &mut FileDiff, hunk: &Hunk) -> Option<Classification> {
-        let language = file.language?;
+    fn classify(&self, file: &mut FileDiff, hunk: &Hunk) -> Vec<Finding> {
+        let Some(language) = file.language else {
+            return Vec::new();
+        };
         if hunk.added_lines.is_empty() && hunk.removed_lines.is_empty() {
-            return None;
+            return Vec::new();
         }
 
         let _ = file.ensure_content();
-        let new_content = file.new_content.as_deref()?;
-        let new_tree = parse(language, new_content)?;
-        let decls = collect_public_decls(language, &new_tree, new_content.as_bytes());
+        let mut findings: Vec<Finding> = Vec::new();
+        let mut seen_new: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        let mut seen_old: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
 
-        // Find the first public-decl signature that any added line falls in.
-        for decl in &decls {
-            for &line in &hunk.added_lines {
-                if line >= decl.sig.0 && line <= decl.sig.1 {
-                    return Some(Classification {
-                        level: Level::Review,
-                        category: Category::PublicApiChange,
-                        rationale: format!(
-                            "{} signature changed at lines {}–{}",
-                            decl.kind_label, decl.sig.0, decl.sig.1
-                        ),
-                        source: Source::Heuristic {
-                            name: "public_api".into(),
-                        },
-                        focus_lines: Some(FocusLines {
-                            start: decl.sig.0,
-                            end: decl.sig.1,
-                            side: Side::New,
-                        }),
-                    });
-                }
-            }
-        }
-
-        // Removed-only changes (e.g. a deleted public fn) — also worth
-        // flagging. Look at old tree.
-        if !hunk.removed_lines.is_empty() {
-            let old_content = file.old_content.as_deref()?;
-            let old_tree = parse(language, old_content)?;
-            let old_decls = collect_public_decls(language, &old_tree, old_content.as_bytes());
-            for decl in &old_decls {
-                for &line in &hunk.removed_lines {
-                    if line >= decl.sig.0 && line <= decl.sig.1 {
-                        return Some(Classification {
+        // New side: every public decl whose signature overlaps an added line.
+        if let Some(new_content) = file.new_content.as_deref() {
+            if let Some(new_tree) = parse(language, new_content) {
+                let decls = collect_public_decls(language, &new_tree, new_content.as_bytes());
+                for decl in &decls {
+                    if hunk
+                        .added_lines
+                        .iter()
+                        .any(|&l| l >= decl.sig.0 && l <= decl.sig.1)
+                        && seen_new.insert(decl.sig)
+                    {
+                        findings.push(Finding {
                             level: Level::Review,
                             category: Category::PublicApiChange,
                             rationale: format!(
-                                "{} removed at old lines {}–{}",
+                                "{} signature changed at lines {}–{}",
                                 decl.kind_label, decl.sig.0, decl.sig.1
                             ),
                             source: Source::Heuristic {
@@ -99,7 +79,7 @@ impl Classifier for PublicApi {
                             focus_lines: Some(FocusLines {
                                 start: decl.sig.0,
                                 end: decl.sig.1,
-                                side: Side::Old,
+                                side: Side::New,
                             }),
                         });
                     }
@@ -107,7 +87,42 @@ impl Classifier for PublicApi {
             }
         }
 
-        None
+        // Old side: every public decl whose signature overlaps a removed line.
+        if !hunk.removed_lines.is_empty() {
+            if let Some(old_content) = file.old_content.as_deref() {
+                if let Some(old_tree) = parse(language, old_content) {
+                    let old_decls =
+                        collect_public_decls(language, &old_tree, old_content.as_bytes());
+                    for decl in &old_decls {
+                        if hunk
+                            .removed_lines
+                            .iter()
+                            .any(|&l| l >= decl.sig.0 && l <= decl.sig.1)
+                            && seen_old.insert(decl.sig)
+                        {
+                            findings.push(Finding {
+                                level: Level::Review,
+                                category: Category::PublicApiChange,
+                                rationale: format!(
+                                    "{} removed at old lines {}–{}",
+                                    decl.kind_label, decl.sig.0, decl.sig.1
+                                ),
+                                source: Source::Heuristic {
+                                    name: "public_api".into(),
+                                },
+                                focus_lines: Some(FocusLines {
+                                    start: decl.sig.0,
+                                    end: decl.sig.1,
+                                    side: Side::Old,
+                                }),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        findings
     }
 }
 
@@ -317,12 +332,23 @@ mod tests {
         let old = "pub fn apply(x: u32) -> u32 {\n    x + 1\n}\n";
         let new = "pub fn apply(x: u32, y: u32) -> u32 {\n    x + y\n}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![1], vec![1]);
-        let result = PublicApi::new().classify(&mut f, &h).unwrap();
-        assert_eq!(result.level, Level::Review);
-        assert_eq!(result.category, Category::PublicApiChange);
-        let focus = result.focus_lines.unwrap();
-        assert_eq!(focus.side, Side::New);
-        assert!(focus.start <= 1 && focus.end >= 1);
+        let result = PublicApi::new().classify(&mut f, &h);
+        // One finding per side: the new signature on added line 1, and the
+        // old signature on removed line 1. Range-grouping in consolidate.rs
+        // keeps them as separate items (opposite sides don't merge).
+        assert_eq!(result.len(), 2);
+        for f in &result {
+            assert_eq!(f.level, Level::Review);
+            assert_eq!(f.category, Category::PublicApiChange);
+        }
+        assert!(result.iter().any(|f| f
+            .focus_lines
+            .as_ref()
+            .is_some_and(|fl| fl.side == Side::New)));
+        assert!(result.iter().any(|f| f
+            .focus_lines
+            .as_ref()
+            .is_some_and(|fl| fl.side == Side::Old)));
     }
 
     #[test]
@@ -331,7 +357,7 @@ mod tests {
         let new = "pub fn apply(x: u32) -> u32 {\n    x + 2\n}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![2], vec![2]);
         // Line 2 is the body. Signature on line 1 is unchanged.
-        assert!(PublicApi::new().classify(&mut f, &h).is_none());
+        assert!(PublicApi::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -339,7 +365,7 @@ mod tests {
         let old = "fn helper(x: u32) -> u32 {\n    x + 1\n}\n";
         let new = "fn helper(x: u32, y: u32) -> u32 {\n    x + y\n}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![1], vec![1]);
-        assert!(PublicApi::new().classify(&mut f, &h).is_none());
+        assert!(PublicApi::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -348,7 +374,7 @@ mod tests {
         let new = "pub struct Foo {\n    pub a: u32,\n    pub b: u32,\n}\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![3], vec![]);
         // Struct body is part of its public surface — line 3 is added.
-        assert!(PublicApi::new().classify(&mut f, &h).is_some());
+        assert!(!PublicApi::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -356,7 +382,7 @@ mod tests {
         let old = "pub const MAX: u32 = 10;\n";
         let new = "pub const MAX: u32 = 20;\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![1], vec![1]);
-        assert!(PublicApi::new().classify(&mut f, &h).is_some());
+        assert!(!PublicApi::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -364,7 +390,21 @@ mod tests {
         let old = "pub(crate) fn apply(x: u32) -> u32 { x }\n";
         let new = "pub(crate) fn apply(x: u32, y: u32) -> u32 { x + y }\n";
         let (mut f, h) = fixture(Language::Rust, old, new, vec![1], vec![1]);
-        assert!(PublicApi::new().classify(&mut f, &h).is_some());
+        assert!(!PublicApi::new().classify(&mut f, &h).is_empty());
+    }
+
+    /// Two pub fn signatures touched in the same hunk produce two findings.
+    #[test]
+    fn rust_two_pub_fn_signatures_produce_two_findings() {
+        let old = "pub fn a(x: u32) -> u32 { x }\npub fn b(y: u32) -> u32 { y }\n";
+        let new = "pub fn a(x: u32, z: u32) -> u32 { x + z }\npub fn b(y: u32, w: u32) -> u32 { y + w }\n";
+        let (mut f, h) = fixture(Language::Rust, old, new, vec![1, 2], vec![1, 2]);
+        let result = PublicApi::new().classify(&mut f, &h);
+        // Two new-side findings (one per fn) plus two old-side findings.
+        assert_eq!(result.len(), 4, "got {:?}", result);
+        assert!(result
+            .iter()
+            .all(|r| r.category == Category::PublicApiChange));
     }
 
     #[test]
@@ -372,8 +412,9 @@ mod tests {
         let old = "def apply(x):\n    return x + 1\n";
         let new = "def apply(x, y):\n    return x + y\n";
         let (mut f, h) = fixture(Language::Python, old, new, vec![1], vec![1]);
-        let result = PublicApi::new().classify(&mut f, &h).unwrap();
-        assert_eq!(result.category, Category::PublicApiChange);
+        let result = PublicApi::new().classify(&mut f, &h);
+        assert!(!result.is_empty());
+        assert_eq!(result[0].category, Category::PublicApiChange);
     }
 
     #[test]
@@ -381,7 +422,7 @@ mod tests {
         let old = "def _helper(x):\n    return x + 1\n";
         let new = "def _helper(x, y):\n    return x + y\n";
         let (mut f, h) = fixture(Language::Python, old, new, vec![1], vec![1]);
-        assert!(PublicApi::new().classify(&mut f, &h).is_none());
+        assert!(PublicApi::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -389,7 +430,7 @@ mod tests {
         let old = "class Foo:\n    pass\n";
         let new = "class Foo(Bar):\n    pass\n";
         let (mut f, h) = fixture(Language::Python, old, new, vec![1], vec![1]);
-        assert!(PublicApi::new().classify(&mut f, &h).is_some());
+        assert!(!PublicApi::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -397,7 +438,7 @@ mod tests {
         let old = "def apply(x):\n    return x + 1\n";
         let new = "def apply(x):\n    return x + 2\n";
         let (mut f, h) = fixture(Language::Python, old, new, vec![2], vec![2]);
-        assert!(PublicApi::new().classify(&mut f, &h).is_none());
+        assert!(PublicApi::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -405,7 +446,7 @@ mod tests {
         let old = "export function apply(x: number): number {\n    return x + 1;\n}\n";
         let new = "export function apply(x: number, y: number): number {\n    return x + y;\n}\n";
         let (mut f, h) = fixture(Language::TypeScript, old, new, vec![1], vec![1]);
-        assert!(PublicApi::new().classify(&mut f, &h).is_some());
+        assert!(!PublicApi::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -413,7 +454,7 @@ mod tests {
         let old = "function helper(x: number): number {\n    return x + 1;\n}\n";
         let new = "function helper(x: number, y: number): number {\n    return x + y;\n}\n";
         let (mut f, h) = fixture(Language::TypeScript, old, new, vec![1], vec![1]);
-        assert!(PublicApi::new().classify(&mut f, &h).is_none());
+        assert!(PublicApi::new().classify(&mut f, &h).is_empty());
     }
 
     #[test]
@@ -421,6 +462,6 @@ mod tests {
         let old = "export const VERSION = '1.0';\n";
         let new = "export const VERSION = '2.0';\n";
         let (mut f, h) = fixture(Language::JavaScript, old, new, vec![1], vec![1]);
-        assert!(PublicApi::new().classify(&mut f, &h).is_some());
+        assert!(!PublicApi::new().classify(&mut f, &h).is_empty());
     }
 }

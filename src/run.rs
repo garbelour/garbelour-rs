@@ -1,8 +1,6 @@
 use clap::Parser;
 
-use crate::classify::{
-    Category, Classification, Classified, Level, Pipeline, PipelineConfig, Source,
-};
+use crate::classify::{Category, Finding, HunkFindings, Level, Pipeline, PipelineConfig, Source};
 use crate::cli::{Cli, ColorChoice, Command, Format, FormatChoice, ReviewArgs};
 use crate::config::Config;
 use crate::consolidate;
@@ -20,6 +18,7 @@ fn build_pipeline_config(args: &ReviewArgs, config: &Config) -> PipelineConfig {
         generated_globs,
         generated_paths,
         lockfile_names,
+        ..PipelineConfig::default()
     }
 }
 
@@ -113,28 +112,45 @@ fn review(args: ReviewArgs) -> anyhow::Result<u8> {
         None
     };
 
+    let llm_attempted = llm_config.is_some();
     if let Some(cfg) = &llm_config {
         if !unclassified.is_empty() {
             let llm_results = llm::classify_hunks(&unclassified, cfg)?;
-            classified.extend(llm_results);
+            // Defensive merge: if the LLM somehow produced findings for a
+            // hunk that already has heuristic findings, append rather than
+            // duplicating. Per design we only ask the LLM for unclassified
+            // hunks, so this branch should be a no-op — but cheap to keep.
+            for hf in llm_results {
+                if let Some(existing) = classified.iter_mut().find(|c| c.hunk_id == hf.hunk_id) {
+                    existing.findings.extend(hf.findings);
+                } else {
+                    classified.push(hf);
+                }
+            }
         }
     }
 
     for u in &unclassified {
         if !classified.iter().any(|c| c.hunk_id == u.hunk_id) {
-            classified.push(Classified {
+            let rationale = if llm_attempted {
+                "no heuristic match and LLM declined to verdict: defaulting to review"
+            } else {
+                "no heuristic match and LLM not run: defaulting to review"
+            };
+            classified.push(HunkFindings {
                 hunk_id: u.hunk_id.clone(),
                 file_path: u.file_path.clone(),
+                old_range: u.old_range.clone(),
                 new_range: u.new_range.clone(),
-                classification: Classification {
+                findings: vec![Finding {
                     level: Level::Review,
                     category: Category::LlmAssessed,
-                    rationale: "no heuristic match and LLM not run: defaulting to review".into(),
+                    rationale: rationale.into(),
                     source: Source::Heuristic {
                         name: "default".into(),
                     },
                     focus_lines: None,
-                },
+                }],
             });
         }
     }
