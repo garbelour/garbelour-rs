@@ -77,19 +77,16 @@ impl Item {
             .unwrap_or(Level::Skim)
     }
 
-    /// Highest-severity finding (tie-break: first occurrence). Used as the
-    /// "headline" when rendering.
-    pub fn headline_finding(&self) -> &Finding {
+    /// Highest-severity finding (tie-break: first occurrence). Returns
+    /// `None` for an `Item` with no findings — fields are public, so an
+    /// external constructor could leave them empty. The standard
+    /// consolidation pipeline always produces non-empty findings.
+    pub fn headline_finding(&self) -> Option<&Finding> {
+        if self.findings.is_empty() {
+            return None;
+        }
         let max_level = self.level();
-        self.findings
-            .iter()
-            .find(|f| f.level == max_level)
-            .unwrap_or(&self.findings[0])
-    }
-
-    /// The first location — used as the primary anchor.
-    pub fn primary(&self) -> &Location {
-        &self.locations[0]
+        self.findings.iter().find(|f| f.level == max_level)
     }
 }
 
@@ -476,27 +473,29 @@ fn apply_groups(items: Vec<Item>, groups: Vec<Group>, config: &LlmConfig) -> Vec
         }
         let group = &groups[group_idx];
 
-        // Walk in declared id order. The first surviving member supplies
-        // (file_path, side, range) — the "primary". Defense-in-depth:
-        // even though `parse_consolidation_response` enforces same-file +
-        // same-side, any group member whose (file, side) doesn't match the
-        // primary is preserved as a standalone item rather than silently
-        // merged. Cross-side merges would produce inconsistent anchors
-        // (post-image locations linked from an old-side primary, etc).
-        let mut primary_meta: Option<(PathBuf, Side, InclusiveLineRange)> = None;
+        // Walk in declared id order. The first surviving member fixes the
+        // (file_path, side) the rest of the group must agree with. The
+        // merged item's `range` is the *union* (min start, max end) across
+        // all matched members — a single member's range under-represents
+        // the span of a multi-location group. Defense-in-depth: even though
+        // `parse_consolidation_response` enforces same-file + same-side,
+        // any member whose (file, side) doesn't match is preserved as a
+        // standalone item rather than silently merged.
+        let mut primary_id_and_side: Option<(PathBuf, Side)> = None;
         for &gi in &group.ids {
             if let Some(item) = slots[gi].as_ref() {
-                primary_meta = Some((item.file_path.clone(), item.side, item.range));
+                primary_id_and_side = Some((item.file_path.clone(), item.side));
                 break;
             }
         }
-        let Some((file_path, side, range)) = primary_meta else {
+        let Some((file_path, side)) = primary_id_and_side else {
             continue;
         };
 
         let mut merged_findings: Vec<Finding> = Vec::new();
         let mut locations: Vec<Location> = Vec::new();
         let mut matched_members: usize = 0;
+        let mut range: Option<InclusiveLineRange> = None;
         for &gi in &group.ids {
             if let Some(item) = slots[gi].take() {
                 if item.file_path != file_path || item.side != side {
@@ -504,6 +503,13 @@ fn apply_groups(items: Vec<Item>, groups: Vec<Group>, config: &LlmConfig) -> Vec
                     continue;
                 }
                 matched_members += 1;
+                range = Some(match range {
+                    None => item.range,
+                    Some(r) => InclusiveLineRange {
+                        start: r.start.min(item.range.start),
+                        end: r.end.max(item.range.end),
+                    },
+                });
                 for loc in item.locations {
                     if !locations.iter().any(|l| l.hunk_id == loc.hunk_id) {
                         locations.push(loc);
@@ -512,6 +518,9 @@ fn apply_groups(items: Vec<Item>, groups: Vec<Group>, config: &LlmConfig) -> Vec
                 merged_findings.extend(item.findings);
             }
         }
+        let Some(range) = range else {
+            continue;
+        };
 
         // If fewer than two members actually agreed on (file, side), don't
         // synthesize a summary — emit the lone primary as a standalone item
@@ -855,6 +864,79 @@ mod tests {
         let raw = r#"{"groups":[{"ids":[0,1],"merged_rationale":"both"}]}"#;
         let groups = parse_consolidation_response(raw, &[0, 1], &items);
         assert!(groups.is_empty(), "cross-file group should be rejected");
+    }
+
+    /// Multi-location Stage-B groups expose a merged range that spans
+    /// every matched member, not just the primary's slice.
+    #[test]
+    fn apply_groups_unions_member_ranges_into_merged_range() {
+        let cfg = LlmConfig {
+            provider: LlmProvider::Anthropic,
+            model: "test".into(),
+            api_key: "x".into(),
+            base_url: "http://localhost".into(),
+        };
+        let items = vec![
+            Item {
+                file_path: PathBuf::from("src/a.rs"),
+                side: Side::New,
+                range: InclusiveLineRange { start: 30, end: 40 },
+                locations: vec![Location {
+                    hunk_id: HunkId("a:30".into()),
+                    new_range: LineRange {
+                        start: 30,
+                        count: 10,
+                    },
+                    old_range: LineRange {
+                        start: 30,
+                        count: 10,
+                    },
+                }],
+                findings: vec![finding(
+                    Level::Review,
+                    Category::PublicApiChange,
+                    "lowpass",
+                    Some((30, 40, Side::New)),
+                )],
+            },
+            Item {
+                file_path: PathBuf::from("src/a.rs"),
+                side: Side::New,
+                range: InclusiveLineRange {
+                    start: 200,
+                    end: 220,
+                },
+                locations: vec![Location {
+                    hunk_id: HunkId("a:200".into()),
+                    new_range: LineRange {
+                        start: 200,
+                        count: 21,
+                    },
+                    old_range: LineRange {
+                        start: 200,
+                        count: 21,
+                    },
+                }],
+                findings: vec![finding(
+                    Level::Review,
+                    Category::PublicApiChange,
+                    "highpass",
+                    Some((200, 220, Side::New)),
+                )],
+            },
+        ];
+        let groups = vec![Group {
+            ids: vec![0, 1],
+            rationale: "same change applied to LowPass and HighPass".into(),
+        }];
+        let out = apply_groups(items, groups, &cfg);
+        assert_eq!(out.len(), 1);
+        // Union of (30..=40) and (200..=220).
+        assert_eq!(out[0].range.start, 30);
+        assert_eq!(out[0].range.end, 220);
+        assert_eq!(out[0].locations.len(), 2);
+        // Summary + 2 member findings.
+        assert_eq!(out[0].findings.len(), 3);
     }
 
     /// `apply_groups` is defense-in-depth: even if a malformed group with

@@ -65,12 +65,15 @@ pub fn human(_diff: &Diff, items: &[Item], use_color: bool) -> String {
             Level::Skim => skim.push(c),
             Level::Skip => {
                 // Each Skip item rolls into the per-category file-count
-                // summary, once per location. Use the headline finding's
-                // category to pick the bucket.
-                let category = c.headline_finding().category;
-                let entry = skip.entry(category).or_default();
-                for _loc in &c.locations {
-                    entry.push(c.file_path.display().to_string());
+                // summary, once per location. A single Skip item may carry
+                // multiple Skip findings from different categories (e.g.
+                // Generated + Lockfile on the same hunk) — count each so
+                // non-headline categories aren't dropped from the breakdown.
+                for f in &c.findings {
+                    let entry = skip.entry(f.category).or_default();
+                    for _loc in &c.locations {
+                        entry.push(c.file_path.display().to_string());
+                    }
                 }
             }
         }
@@ -125,6 +128,13 @@ fn push_section(
     let locators: Vec<String> = items.iter().map(|c| human_locator(c)).collect();
     let max = locators.iter().map(|s| s.len()).max().unwrap_or(0);
     for (c, loc) in items.iter().zip(locators.iter()) {
+        let findings = sorted_findings(c);
+        // Defensive: skip an externally-constructed Item with no findings
+        // rather than panic on findings[0]. The internal pipeline always
+        // produces non-empty findings.
+        let Some(head) = findings.first() else {
+            continue;
+        };
         let pad = " ".repeat(max.saturating_sub(loc.len()) + 4);
         let mut left = format!("    {loc}");
         if use_color {
@@ -132,8 +142,6 @@ fn push_section(
         }
         out.push_str(&left);
         out.push_str(&pad);
-        let findings = sorted_findings(c);
-        let head = findings[0];
         out.push_str(&head.rationale);
         out.push('\n');
         // Sub-bullets for any additional findings.
@@ -319,10 +327,14 @@ pub fn markdown(_diff: &Diff, items: &[Item], repo_ref: Option<&RepoRef>) -> Str
             Level::Review => review.push(c),
             Level::Skim => skim.push(c),
             Level::Skip => {
-                let category = c.headline_finding().category;
-                let entry = skip.entry(category).or_default();
-                for _loc in &c.locations {
-                    entry.push(c.file_path.display().to_string());
+                // See `human()` — count each Skip finding under its own
+                // category so multi-category Skip items are visible in the
+                // breakdown.
+                for f in &c.findings {
+                    let entry = skip.entry(f.category).or_default();
+                    for _loc in &c.locations {
+                        entry.push(c.file_path.display().to_string());
+                    }
                 }
             }
         }
@@ -374,8 +386,12 @@ pub fn markdown(_diff: &Diff, items: &[Item], repo_ref: Option<&RepoRef>) -> Str
 
 fn markdown_item(c: &Item, repo_ref: Option<&RepoRef>) -> String {
     let findings = sorted_findings(c);
+    let Some(head) = findings.first() else {
+        // Externally-constructed Item with no findings — emit nothing
+        // rather than panic on findings[0].
+        return String::new();
+    };
     let anchor = markdown_anchor(c, repo_ref);
-    let head = findings[0];
     let mut out = String::new();
     if findings.len() == 1 {
         out.push_str(&format!("- {}: {}\n", anchor, head.rationale));
@@ -652,6 +668,26 @@ mod tests {
         assert!(out.contains("src/x.rs:42"));
         assert!(out.contains("test rationale"));
         assert!(!out.contains("\x1b["));
+    }
+
+    /// A Skip item carrying both a Generated finding AND a Lockfile finding
+    /// shows up under both categories — neither is dropped.
+    #[test]
+    fn human_skip_summary_counts_each_finding_category() {
+        let hf = HunkFindings {
+            hunk_id: HunkId("Cargo.lock:1".into()),
+            file_path: PathBuf::from("Cargo.lock"),
+            old_range: LineRange { start: 1, count: 1 },
+            new_range: LineRange { start: 1, count: 1 },
+            findings: vec![
+                finding(Level::Skip, Category::Generated, "generated", None),
+                finding(Level::Skip, Category::Lockfile, "lockfile", None),
+            ],
+        };
+        let items = consolidate_exact(vec![hf]);
+        let out = human(&diff(), &items, false);
+        assert!(out.contains("generated (1)"));
+        assert!(out.contains("lockfile (1)"));
     }
 
     #[test]
